@@ -8,6 +8,7 @@ from scipy.interpolate import interp1d, Akima1DInterpolator as Ak_i
 from scipy.optimize import leastsq
 from scipy.special import wofz
 from astropy.io import fits
+import os
 import math
 
 jangstrom = \
@@ -24,11 +25,10 @@ class Spectrum(object):
   slicing
 
   Example:
-  .............................................................................
-  S1 = Spectrum(x1, y1, e1)
-  S2 = Spectrum(x1, y1, e1)
-  
-  S3 = S1 - S2
+  >>> S1 = Spectrum(x1, y1, e1)
+  >>> S2 = Spectrum(x1, y1, e1)
+  >>> S3 = S1 - S2
+
   .............................................................................
   In this case S1, S2, and S3 are all 'Spectrum' objects but the errors on S3
   are calculated as S3.e = sqrt(S1.e**2 + S2.e**2)
@@ -37,20 +37,23 @@ class Spectrum(object):
 
   Example:
   .............................................................................
-  plt.plot(S.x, S.y) #plots the spectrum with matplotlib
-  plt.show()
+  >>> plt.plot(S.x, S.y) #plots the spectrum with matplotlib
+  >>> plt.show()
+
   .............................................................................
   """
 
-  def __init__(self, x, y, e):
+  def __init__(self, x, y, e, name=""):
     """
     Initialise spectrum
     """
     assert isinstance(x, np.ndarray)
     assert isinstance(y, np.ndarray)
     assert isinstance(e, np.ndarray)
+    assert isinstance(name, str)
     assert x.ndim == y.ndim == e.ndim == 1
     assert len(x) == len(y) == len(e)
+    self.name = name
     self.x = x
     self.y = y
     self.e = e
@@ -66,7 +69,7 @@ class Spectrum(object):
     """
     Return spectrum representation
     """
-    return "Spectrum class with {} pixels".format(len(self))
+    return "Spectrum class with {} pixels\nName: {}".format(len(self), self.name)
 
   def __getitem__(self, key):
     """
@@ -80,7 +83,7 @@ class Spectrum(object):
         if isinstance(key, np.ndarray):
           assert len(key) == len(self)
           assert key.dtype == bool
-        return Spectrum(*indexed_data)
+        return Spectrum(*indexed_data, self.name)
     else:
       raise TypeError
 
@@ -256,7 +259,7 @@ class Spectrum(object):
     or X.x if X is Spectrum type. This returns a new spectrum rather than
     updating a spectrum in place, however this can be acheived by
 
-    S1 = S1.interp_wave(X)
+    >>> S1 = S1.interp_wave(X)
 
     Wavelengths outside the range of the original spectrum are filled with
     zeroes. By default the interpolation is nearest neighbour.
@@ -269,8 +272,8 @@ class Spectrum(object):
       raise TypeError
     if kind == "Akima":
       pass
-      y2 = Aki(self.x, self.y)(x2)
-      e2 = Aki(self.x, self.y)(x2)
+      y2 = Ak_i(self.x, self.y)(x2)
+      e2 = Ak_i(self.x, self.y)(x2)
       nan = np.isnan(y2) | np.isnan(e2)
       y2[nan] = 0.
       e2[nan] = 0.
@@ -280,7 +283,7 @@ class Spectrum(object):
         bounds_error=False, fill_value=0., **kwargs)(x2)
       e2 = interp1d(self.x, self.e, kind=kind, \
         bounds_error=False, fill_value=0., **kwargs)(x2)
-    return Spectrum(x2,y2,e2)
+    return Spectrum(x2,y2,e2, self.name)
 
   def copy(self):
     """
@@ -296,7 +299,7 @@ class Spectrum(object):
 
   def clip(self, x0, x1): 
     """
-    Returns Spectrum clipped between x0 and x1
+    Returns Spectrum clipped between x0 and x1.
     """
     return self[self.sect(x0, x1)]
 
@@ -349,12 +352,17 @@ class Spectrum(object):
     self.y *= arr
     self.e *= arr
 
-  def apply_redshift(self, v, wavelengths):
+  def apply_redshift(self, v, wavelengths, unit='km/s'):
     """
     Applies redshift of v km/s to spectrum for "air" or "vac" wavelengths
     """
     c0 = 2.99792458e5
-    beta = v/c0
+    if unit == 'km/s':
+      beta = v/c0
+    elif unit == 'c':
+      beta = v
+    else:
+      raise ValueError("'unit' should be in ['km/s', 'c']")
     factor = math.sqrt((1+beta)/(1-beta))
     if wavelengths == "air":
       self.x = air_to_vac(self.x) 
@@ -395,14 +403,57 @@ class Spectrum(object):
   def convolve_gaussian_R(self, res):
     self.y = convolve_gaussian_R(self.x, self.y, res)
 
+  def split(self, W):
+    """
+    If W is an int/float, splits spectrum in two around W. If W is an
+    interable of ints/floats, this will split into mutliple chunks instead.
+    """
+    if isinstance(W, (int, float)):
+      W = -np.inf, W, np.inf
+    elif isinstance(W, (list, tuple, np.ndarray)):
+      if not all([isinstance(w, (int, float)) for w in W]): raise TypeError
+      W = -np.inf, *sorted(W), np.inf
+    else:
+      raise TypeError
+    return tuple(self.clip(*pair) for pair in zip(W[:-1], W[1:]))
+
+  def join(self, other, sort=False):
+    """
+    Joins a second spectrum to the current spectrum. Can potentially be used
+    rescursively, i.e.
+    >>> S = S1.join(S2).join(S3)
+
+    But  will not be as fast as 
+    """
+    assert isinstance(other, Spectrum)
+    return join_spectra((self, other), sort=sort)
+
 #..............................................................................
+
+def join_spectra(SS, sort=False):
+  """
+  Joins a collection of spectra into a single spectrum. The name of the first
+  spectrum is used as the new name. Can optionally sort the new spectrum by
+  wavelengths.
+  """
+  for S in SS:
+    assert isinstance(S, Spectrum), 'item is not Spectrum'
+  x = np.hstack(S.x for S in SS)
+  y = np.hstack(S.y for S in SS)
+  e = np.hstack(S.e for S in SS)
+  if sort:
+    idx = np.argsort(x)
+    return Spectrum(x[idx], y[idx], e[idx], name=SS[0].name)
+  else:
+    return Spectrum(x, y, e, name=SS[0].name)
 
 def spec_from_txt(fname, **kwargs):
   """
   Loads a text file with the first 3 columns as wavelengths, fluxes, errors.
   """
-  x, y, e = np.loadtxt( fname, unpack=True, usecols=(0,1,2), **kwargs )
-  return Spectrum(x,y,e)
+  x, y, e = np.loadtxt(fname, unpack=True, usecols=(0,1,2), **kwargs)
+  name = os.path.splitext(os.path.basename(fname))[0]
+  return Spectrum(x, y, e, name=name)
     
 def model_from_txt(fname, **kwargs):
   """
@@ -410,8 +461,9 @@ def model_from_txt(fname, **kwargs):
   This produces a spectrum object where the errors are just set to zero.
   This is therefore good to use for models.
   """
-  x, y = np.loadtxt( fname, unpack=True, usecols=(0,1), **kwargs )
-  return Spectrum(x,y,np.zeros_like(x))
+  x, y = np.loadtxt(fname, unpack=True, usecols=(0,1), **kwargs)
+  name = os.path.splitext(os.path.basename(fname))[0]
+  return Spectrum(x, y, np.zeros_like(x), name=name)
 
 def spec_from_sdss_fits(fname, **kwargs):
   """
@@ -422,7 +474,8 @@ def spec_from_sdss_fits(fname, **kwargs):
   lam = 10**loglam
   ivar[ivar==0.] = 0.001
   err = 1/np.sqrt(ivar)
-  return Spectrum(lam,flux,err)*1e-17
+  name = os.path.splitext(os.path.basename(fname))[0]
+  return Spectrum(lam, flux, err, name=name)*1e-17
 
 def spectra_mean(spectra):
   """
@@ -714,73 +767,44 @@ def sdss_mag2fl( w, ugriz, ugrizErr=None ):
     return F_lambda, F_err
 #
 
-def convolve_gaussian( x, y, FWHM ):
-  sigma = FWHM/2.355
-
-  x0 = np.min(x)
-  xN = np.max(x)
-  N = len(x)
-
-  #oversample x-axis by at least factor 10 (up to 20).
-  xi = np.linspace( x0, xN, next_pow_2(10*N) )
-
-  Ni = len(xi)
-
-  interp_func = interp1d( x, y )
-  yi = interp_func( xi )
-
-  yg = np.zeros_like( xi )
-  yg = np.exp( -0.5*((xi-x0)/sigma)**2 ) #half gaussian
-  yg[Ni//2:] = yg[Ni//2:0:-1]
-
-  yg /= np.sum(yg)
-
-  yiF = np.fft.fft( yi )
-  ygF = np.fft.fft( yg )
-  yic = np.real( np.fft.ifft( yiF * ygF ) )
-
-  interp_func2 = interp1d( xi, yic )
-
-  return interp_func2( x )
-#
-
-def convolve_gaussian_R( x, y, R ):
-  sigma = 1./(2.355*R)
-
-  xL = np.log( x )
-
-  xL0 = np.min(xL)
-  xLN = np.max(xL)
-  N = len(x)
-
-  #oversample x-axis by at least factor 10 (up to 20).
-  xLi = np.linspace( xL0, xLN, next_pow_2(10*N) )
-
-  Ni = len(xLi)
-
-  interp_func = interp1d( xL, y )
-  yi = interp_func( xLi )
-
-  yg = np.zeros_like( xLi )
-  yg = np.exp( -0.5*((xLi-xL0)/sigma)**2 ) #half gaussian
-  yg[Ni//2:] = yg[Ni//2:0:-1]
-
-  yg /= np.sum(yg)
-
-  yiF = np.fft.fft( yi )
-  ygF = np.fft.fft( yg )
-  yic = np.real( np.fft.ifft( yiF * ygF ) )
-
-  interp_func2 = interp1d( xLi, yic )
-
-  return interp_func2( xL )
-#
-
-def next_pow_2( N_in ):
+def next_pow_2(N_in):
   N_out = 1
   while N_out < N_in:
     N_out *= 2
   return N_out
+
+def convolve_gaussian(x, y, FWHM):
+  """
+  Convolve spectrum with a Gaussian with FWHM by oversampling and
+  using an FFT approach. Wavelengths are assumed to be sorted,
+  but uniform spacing is not required. Will cause wrap-around at
+  the end of the spectrum.
+  """
+  sigma = FWHM/2.355
+
+  #oversample data by at least factor 10 (up to 20).
+  xi = np.linspace(x[0], x[-1], next_pow_2(10*len(x)))
+  yi = interp1d(x, y)(xi)
+
+  yg = np.exp(-0.5*((xi-x[0])/sigma)**2) #half gaussian
+  yg += yg[::-1]
+  yg /= np.sum(yg) #Norm kernel
+
+  yiF = np.fft.fft(yi)
+  ygF = np.fft.fft(yg)
+  yic = np.fft.ifft(yiF * ygF).real
+
+  return interp1d(xi, yic)(x)
+#
+
+def convolve_gaussian_R(x, y, R):
+  """
+  Similar to convolve_gaussian, but convolves to a specified resolution
+  rather than a specfied FWHM. Essentially this amounts to convolving
+  along a log-uniform x-axis instead.
+  """
+  return convolve_gaussian(np.log(x), y, 1./R)
+#
 
 def black_body( x, T, norm=True ):
   """
@@ -849,18 +873,3 @@ def keep_points( x, fname ):
     x1,x2 = float(s1),float(s2)
     C |= (x>x1)&(x<x2)
   return C
-
-if __name__ == "__main__":
-  folder = "/home/astro/phujdu/spectra/"
-  fname = "SDSSJ153505.75+124744.2_54240-2754-0570.dat" 
-  S = spec_from_txt(folder+fname)
-
-  print("for s in S")
-  for i in range(1000):
-    for s in S:
-      pass
-
-  print("for s in S")
-  for i in range(1000):
-    for s in zip(S.x, S.y, S.e):
-      pass
