@@ -1,15 +1,20 @@
 from __future__ import print_function, division
-
 __author__ = "Mark Hollands"
 
 import numpy as np
+import matplotlib.pyplot as plt
 from sys import exit
 from scipy.interpolate import interp1d, Akima1DInterpolator as Ak_i
 from scipy.optimize import leastsq
 from scipy.special import wofz
+from scipy.integrate import trapz as Itrapz, simps as Isimps
 from astropy.io import fits
+from functools import reduce
+import operator
 import os
 import math
+import astropy.units as u
+import astropy.constants as const
 
 jangstrom = \
   "$\mathrm{erg}\;\mathrm{s}^{-1}\,\mathrm{cm}^{-2}\,\mathrm{\AA}^{-1}$"
@@ -37,13 +42,13 @@ class Spectrum(object):
 
   Example:
   .............................................................................
-  >>> plt.plot(S.x, S.y) #plots the spectrum with matplotlib
+  >>> S.plot('k-') #plots the spectrum with matplotlib
   >>> plt.show()
 
   .............................................................................
   """
-
-  def __init__(self, x, y, e, name=""):
+  __slots__ = ['name', 'x', 'y', 'e', 'wave', 'x_unit', 'y_unit']
+  def __init__(self, x, y, e, name="", wave='air', x_unit="AA", y_unit="erg/(s cm^2 AA)"):
     """
     Initialise spectrum
     """
@@ -53,7 +58,11 @@ class Spectrum(object):
     assert isinstance(name, str)
     assert x.ndim == y.ndim == e.ndim == 1
     assert len(x) == len(y) == len(e)
+    assert np.all(e >= 0.)
     self.name = name
+    self.wave = wave
+    self.x_unit = u.Unit(x_unit).to_string()
+    self.y_unit = u.Unit(y_unit).to_string()
     self.x = x
     self.y = y
     self.e = e
@@ -69,7 +78,15 @@ class Spectrum(object):
     """
     Return spectrum representation
     """
-    return "Spectrum class with {} pixels\nName: {}".format(len(self), self.name)
+    ret = "\n".join([
+      "Spectrum class with {} pixels".format(len(self)),
+      "Name: {}".format(self.name),
+      "x-unit: {}".format(self.x_unit),
+      "y-unit: {}".format(self.y_unit),
+      "wavelengths: {}".format(self.wave),
+    ])
+
+    return ret
 
   def __getitem__(self, key):
     """
@@ -80,10 +97,7 @@ class Spectrum(object):
       if isinstance(key, int):
         return indexed_data
       else:
-        if isinstance(key, np.ndarray):
-          assert len(key) == len(self)
-          assert key.dtype == bool
-        return Spectrum(*indexed_data, self.name)
+        return Spectrum(*indexed_data, self.name, self.wave, self.x_unit, self.y_unit)
     else:
       raise TypeError
 
@@ -97,106 +111,102 @@ class Spectrum(object):
     """
     Return self + other (with standard error propagation)
     """
-    if isinstance(other, (int, float)):
-      new_data = self.x * 1., \
-                 self.y + other, \
-                 self.e * 1.
-    elif isinstance(other, np.ndarray):
-      assert len(self) == len(other)
-      new_data = self.x * 1., \
-                 self.y + other, \
-                 self.e * 1.
+    if isinstance(other, (int, float, np.ndarray)):
+      if isinstance(other, np.ndarray):
+        assert len(self) == len(other)
+      x2 = self.x * 1.
+      y2 = self.y + other
+      e2 = self.e * 1.
     elif isinstance(other, Spectrum):
       assert len(self) == len(other)
       assert np.all(np.isclose(self.x, other.x))
-      new_data = 0.5*(self.x+other.x), \
-                 self.y+other.y, \
-                 np.hypot(self.e, other.e)
+      assert self.x_unit == other.x_unit
+      assert self.y_unit == other.y_unit
+      x2 = 0.5*(self.x+other.x)
+      y2 = self.y+other.y
+      e2 = np.hypot(self.e, other.e)
     else:
       raise TypeError
-    return Spectrum(*new_data)
+    return Spectrum(x2, y2, e2, self.name, self.wave, self.x_unit, self.y_unit)
 
   def __sub__(self, other):
     """
     Return self - other (with standard error propagation)
     """
-    if isinstance(other, (int, float)):
-      new_data = self.x * 1., \
-                 self.y - other, \
-                 self.e * 1.
-    elif isinstance(other, np.ndarray):
-      assert len(self) == len(other)
-      new_data = self.x * 1., \
-                 self.y - other, \
-                 self.e * 1.
+    if isinstance(other, (int, float, np.ndarray)):
+      if isinstance(other, np.ndarray): assert len(self) == len(other)
+      x2 = self.x * 1.
+      y2 = self.y - other
+      e2 = self.e * 1.
     elif isinstance(other, Spectrum):
       assert len(self) == len(other)
       assert np.all(np.isclose(self.x, other.x))
-      new_data = 0.5*(self.x+other.x), \
-                 self.y - other.y, \
-                 np.hypot(self.e, other.e)
+      assert self.x_unit == other.x_unit
+      assert self.y_unit == other.y_unit
+      x2 = 0.5*(self.x+other.x)
+      y2 = self.y - other.y
+      e2 = np.hypot(self.e, other.e)
     else:
       raise TypeError
-    return Spectrum(*new_data)
+    return Spectrum(x2, y2, e2, self.name, self.wave, self.x_unit, self.y_unit)
       
   def __mul__(self, other):
     """
     Return self * other (with standard error propagation)
     """
-    if isinstance(other, (int, float)):
-      new_data = self.x * 1., \
-                 self.y * other, \
-                 self.e * other
-    elif isinstance(other, np.ndarray):
-      assert len(self) == len(other)
-      new_data = self.x * 1., \
-                 self.y * other, \
-                 self.e * other
+    if isinstance(other, (int, float, np.ndarray)):
+      if isinstance(other, np.ndarray): assert len(self) == len(other)
+      x2 = self.x * 1.
+      y2 = self.y * other
+      e2 = self.e * np.abs(other)
+      y_unit = self.y_unit
     elif isinstance(other, Spectrum):
       assert len(self) == len(other)
       assert np.all(np.isclose(self.x, other.x))
-      new_data = 0.5*(self.x+other.x), \
-                 self.y*other.y, \
-                 y2*np.hypot(self.e/self.y, other.e/other.y)
+      assert self.x_unit == other.x_unit
+      x2 = 0.5*(self.x+other.x)
+      y2 = self.y*other.y
+      e2 = np.abs(y2)*np.hypot(self.e/self.y, other.e/other.y)
+      u1, u2 = u.Unit(self.y_unit), u.Unit(other.y_unit)
+      y_unit = (u1*u2).to_string()
     else:
       raise TypeError
-    return Spectrum(*new_data)
+    return Spectrum(x2, y2, e2, self.name, self.wave, self.x_unit, y_unit)
 
   def __truediv__(self, other):
     """
     Return self / other (with standard error propagation)
     """
-    if isinstance(other, (int, float)):
-      new_data = self.x * 1., \
-                 self.y / other, \
-                 self.e / other
-    elif isinstance(other, np.ndarray):
-      assert len(self) == len(other)
-      new_data = self.x * 1., \
-                 self.y / other, \
-                 self.e / other
+    if isinstance(other, (int, float, np.ndarray)):
+      if isinstance(other, np.ndarray): assert len(self) == len(other)
+      x2 = self.x * 1.
+      y2 = self.y / other
+      e2 = self.e / np.abs(other)
+      y_unit = self.y_unit
     elif isinstance(other, Spectrum):
       assert len(self) == len(other)
       assert np.all(np.isclose(self.x, other.x))
+      assert self.x_unit == other.x_unit
+      x2 = 0.5*(self.x+other.x)
       y2 = self.y/other.y
-      new_data = 0.5*(self.x+other.x), \
-                 y2, \
-                 y2*np.hypot(self.e/self.y, other.e/other.y)
+      e2 = np.abs(y2)*np.hypot(self.e/self.y, other.e/other.y)
+      u1, u2 = u.Unit(self.y_unit), u.Unit(other.y_unit)
+      y_unit = (u1/u2).to_string()
     else:
       raise TypeError
-    return Spectrum(*new_data)
+    return Spectrum(x2, y2, e2, self.name, self.wave, self.x_unit, y_unit)
 
   def __pow__(self,other):
     """
     Return S**other (with standard error propagation)
     """
     if isinstance(other, (int, float)):
-      new_data = self.x * 1., \
-                 self.y**other, \
-                 other * y2 * self.e/self.y
+      x2 = self.x * 1.
+      y2 = self.y**other
+      e2 = other * y2 * self.e/self.y
     else:
       raise TypeError
-    return Spectrum(*new_data)
+    return Spectrum(x2, y2, e2, self.name, self.wave, self.x_unit, self.y_unit)
 
   def __radd__(self, other):
     """
@@ -220,23 +230,40 @@ class Spectrum(object):
     """
     Return other / self (with standard error propagation)
     """
-    if isinstance(other, (int, float)):
-      new_data = self.x * 1., \
-                 other / self.y, \
-                 other * self.e /(self.y*self.y)
-    elif isinstance(other,np.ndarray):
-      assert len(self) == len(other)
-      new_data = self.x * 1., \
-                 other / self.y, \
-                 other * self.e /(self.y*self.y)
+    if isinstance(other, (int, float, np.ndarray)):
+      if isinstance(other, np.ndarray): assert len(self) == len(other)
+      x2 = self.x * 1.
+      y2 = other / self.y
+      e2 = other * self.e /(self.y*self.y)
     else:
       raise TypeError
-    return Spectrum(*new_data)
+    y_unit = (1/u.Unit(self.y_unit)).to_string()
+    return Spectrum(x2, y2, e2, self.name, self.wave, self.x_unit, y_unit)
+
+  def __neg__(self):
+    """
+    Implements -self
+    """
+    return -1 * self
+
+  def __pos__(self):
+    """
+    Implements +self
+    """
+    return self
+
+  def __abs__(self):
+    """
+    Implements abs(self)
+    """
+    return Spectrum(self.x, abs(self.y), self.e, self.name, self.wave, self.x_unit, self.y_unit)
+
 
   def apply_mask(self, mask):
     """
     Apply a mask to the spectral fluxes
     """
+    self.x = np.ma.masked_array(self.x, mask)
     self.y = np.ma.masked_array(self.y, mask)
     self.e = np.ma.masked_array(self.e, mask)
 
@@ -247,11 +274,14 @@ class Spectrum(object):
     are statistically independent (not that realistic). See the
     definition of 'mag_clac_AB' for valid filter names.
     """
+    S = self.copy()
+    S.x_unit_to("AA")
+    S.y_unit_to("erg/(s cm2 AA)")
 
     if np.all(self.e == 0):
-      return mag_calc_AB(self.x, self.y, self.y*1e-9, filt, NMONTE=0)
+      return mag_calc_AB(S.x, S.y, S.y*1e-9, filt, NMONTE=0)
     else:
-      return mag_calc_AB(self.x, self.y, self.e, filt, NMONTE=1000)
+      return mag_calc_AB(S.x, S.y, S.e, filt, NMONTE=NMONTE)
 
   def interp_wave(self, X, kind='linear', **kwargs):
     """
@@ -267,6 +297,7 @@ class Spectrum(object):
     if isinstance(X, np.ndarray):
       x2 = 1*X
     elif isinstance(X, Spectrum):
+      assert self.wave == X.wave
       x2 = 1*X.x
     else:
       raise TypeError
@@ -283,7 +314,7 @@ class Spectrum(object):
         bounds_error=False, fill_value=0., **kwargs)(x2)
       e2 = interp1d(self.x, self.e, kind=kind, \
         bounds_error=False, fill_value=0., **kwargs)(x2)
-    return Spectrum(x2,y2,e2, self.name)
+    return Spectrum(x2, y2, e2, self.name, self.wave, self.x_unit, self.y_unit)
 
   def copy(self):
     """
@@ -317,61 +348,95 @@ class Spectrum(object):
     """
     Saves Spectrum to a text file.
     """
-    #C style formatting faster here than .format or f-strings
-    with open(fname, 'w') as F:
+    if fname.endswith((".txt", ".dat")):
+      #C style formatting faster here than .format or f-strings
+      with open(fname, 'w') as F:
+        if errors:
+          for px in self: F.write("%9.3f %12.5E %11.5E\n" %px)
+        else:
+          for px in self: F.write("%9.3f %12.5E\n" %px[:2])
+    elif fname.endswith(".npy"):
       if errors:
-        for px in self: F.write("%9.3f %12.5E %11.5E\n" %px)
+        data = np.array([self.x, self.y, self.e])
       else:
-        for px in self: F.write("%9.3f %12.5E\n" %px[:2])
+        data = np.array([self.x, self.y])
+      np.save(fname, data)
+    else:
+      print("Unrecognised File type")
+      print("Save aborted")
 
   def air_to_vac(self):
     """
     Changes air wavelengths to vaccuum wavelengths in place
     """
-    self.x = air_to_vac(self.x) 
+    assert u.Unit(self.x_unit) == u.Unit("AA")
+    if self.wave == 'air':
+      self.x = air_to_vac(self.x) 
+      self.wave = 'vac'
+    elif self.wave == 'vac':
+      print("wavelengths already vac")
+    else:
+      raise ValueError
 
   def vac_to_air(self):
     """
     Changes vaccuum wavelengths to air wavelengths in place
     """
-    self.x = vac_to_air(self.x) 
+    assert u.Unit(self.x_unit) == u.Unit("AA")
+    if self.wave == 'vac':
+      self.x = vac_to_air(self.x) 
+      self.wave = 'air'
+    elif self.wave == 'air':
+      print("wavelengths already air")
+    else:
+      raise ValueError
 
-  def Flambda_to_Fnu(self):
+  def x_unit_to(self, new_unit):
     """
-    Change Flambda [Jangstrom] to Fnu [Jansky]
+    Changes units of the x-data. Supports conversion between wavelength
+    and energy etc. Argument should be a string.
     """
-    arr = self.x**2/2.998e-5
-    self.y *= arr
-    self.e *= arr
+    assert isinstance(new_unit, str)
 
-  def Fnu_to_Flambda(self):
+    x = self.x * u.Unit(self.x_unit)
+    x = x.to(new_unit, u.spectral())
+    self.x = x.value
+    self.x_unit = u.Unit(new_unit).to_string()
+    
+  def y_unit_to(self, new_unit):
     """
-    Change Flambda [Jansky] to Fnu [Jangstrom]
+    Changes units of the y-data. Supports conversion between Fnu
+    and Flambda etc. Argument should be a string.
     """
-    arr = 2.998e-5/self.x**2
-    self.y *= arr
-    self.e *= arr
+    assert isinstance(new_unit, str)
 
-  def apply_redshift(self, v, wavelengths, unit='km/s'):
+    x = self.x * u.Unit(self.x_unit)
+    y = self.y * u.Unit(self.y_unit)
+    e = self.e * u.Unit(self.y_unit)
+    y = y.to(new_unit, u.spectral_density(x))
+    e = e.to(new_unit, u.spectral_density(x))
+    self.y = y.value
+    self.e = e.value
+    self.y_unit = u.Unit(new_unit).to_string()
+    
+  def apply_redshift(self, v, v_unit="km/s"):
     """
     Applies redshift of v km/s to spectrum for "air" or "vac" wavelengths
     """
-    c0 = 2.99792458e5
-    if unit == 'km/s':
-      beta = v/c0
-    elif unit == 'c':
-      beta = v
-    else:
-      raise ValueError("'unit' should be in ['km/s', 'c']")
+    v *= u.Unit(v_unit)
+    assert v.si.unit == const.c.unit
+    assert self.wave in ('vac', 'air')
+    beta = v/const.c
+    beta = beta.decompose().value
     factor = math.sqrt((1+beta)/(1-beta))
-    if wavelengths == "air":
+    if self.wave == "air":
       self.x = air_to_vac(self.x) 
       self.x *= factor
       self.x = vac_to_air(self.x) 
-    elif wavelengths == "vac":
+    elif self.wave == "vac":
       self.x *= factor
     else:
-      pass
+      raise ValueError("self.wave should be in ['vac', 'air']")
 
   def scale_model(self, S_in, return_scaling_factor=False):
     """
@@ -384,6 +449,8 @@ class Spectrum(object):
     either before or after calling this function.
     """
     assert isinstance(S_in, Spectrum)
+    assert self.x_unit == S_in.x_unit
+    assert self.y_unit == S_in.y_unit
 
     #if M and S already have same x-axis, this won't do much.
     S = S_in[S_in.e>0]
@@ -422,40 +489,58 @@ class Spectrum(object):
     Joins a second spectrum to the current spectrum. Can potentially be used
     rescursively, i.e.
     >>> S = S1.join(S2).join(S3)
-
-    But  will not be as fast as 
     """
     assert isinstance(other, Spectrum)
     return join_spectra((self, other), sort=sort)
 
+  def closest_wave(self, x0):
+    """
+    Returns the pixel index closest in wavelength to x0
+    """
+    return np.argmin(np.abs(self.x-x0))
+
+  def plot(self, *args, errors=False, **kwargs):
+    plt.plot(self.x, self.e if errors else self.y, *args, **kwargs)
+
 #..............................................................................
 
-def join_spectra(SS, sort=False):
+def join_spectra(SS, sort=False, name=None):
   """
   Joins a collection of spectra into a single spectrum. The name of the first
   spectrum is used as the new name. Can optionally sort the new spectrum by
   wavelengths.
   """
+  if name == None: name = SS[0].name
+  
   for S in SS:
     assert isinstance(S, Spectrum), 'item is not Spectrum'
+    assert S.wave == SS[0].wave
+    assert S.x_unit == SS[0].x_unit
+    assert S.y_unit == SS[0].y_unit
+
+  wave = SS[0].wave
+  x_unit = SS[0].x_unit
+  y_unit = SS[0].y_unit
+
   x = np.hstack(S.x for S in SS)
   y = np.hstack(S.y for S in SS)
   e = np.hstack(S.e for S in SS)
+  S = Spectrum(x, y, e, name, wave, x_unit, y_unit)
   if sort:
     idx = np.argsort(x)
-    return Spectrum(x[idx], y[idx], e[idx], name=SS[0].name)
+    return S[idx]
   else:
-    return Spectrum(x, y, e, name=SS[0].name)
+    return S
 
-def spec_from_txt(fname, **kwargs):
+def spec_from_txt(fname, wave='air', x_unit='AA', y_unit='erg/(s cm2 AA)', **kwargs):
   """
   Loads a text file with the first 3 columns as wavelengths, fluxes, errors.
   """
   x, y, e = np.loadtxt(fname, unpack=True, usecols=(0,1,2), **kwargs)
   name = os.path.splitext(os.path.basename(fname))[0]
-  return Spectrum(x, y, e, name=name)
+  return Spectrum(x, y, e, name, wave, x_unit, y_unit)
     
-def model_from_txt(fname, **kwargs):
+def model_from_txt(fname, wave='vac', x_unit='AA', y_unit='erg/(s cm2 AA)', **kwargs):
   """
   Loads a text file with the first 2 columns as wavelengths and fluxes.
   This produces a spectrum object where the errors are just set to zero.
@@ -463,7 +548,42 @@ def model_from_txt(fname, **kwargs):
   """
   x, y = np.loadtxt(fname, unpack=True, usecols=(0,1), **kwargs)
   name = os.path.splitext(os.path.basename(fname))[0]
-  return Spectrum(x, y, np.zeros_like(x), name=name)
+  return Spectrum(x, y, np.zeros_like(x), name, wave, x_unit, y_unit)
+
+def model_from_dk(fname, x_unit='AA', y_unit='erg/(s cm2 AA)', **kwargs):
+  """
+  Similar to model_from_txt, but will autoskip past the DK header. Units are converted 
+  """
+  with open(fname, 'r') as F:
+    skip = 1
+    while True:
+      line = F.readline()
+      if line.startswith("END"):
+        break
+      else:
+        skip += 1
+  M = model_from_txt(fname, 'vac', 'AA', 'erg/(s cm3)', skiprows=skip)
+  M.x_unit_to(x_unit)
+  M.y_unit_to(y_unit)
+  return M
+
+def spec_from_npy(fname, wave='air', x_unit='AA', y_unit='erg/(s cm2 AA)'):
+  """
+  Loads a text file with the first 3 columns as wavelengths, fluxes, errors.
+  """
+  data = np.load(fname)
+  assert data.ndim == 2, "Data must be 2D"
+
+  if data.shape[0] == 2:
+    x, y = data
+    e = np.zeros_like(x)
+  elif data.shape[0] == 3:
+    x, y, e = data
+  else:
+    print("Data should have 2 or 3 columns")
+    exit()
+  name = os.path.splitext(os.path.basename(fname))[0]
+  return Spectrum(x, y, e, name, wave, x_unit, y_unit)
 
 def spec_from_sdss_fits(fname, **kwargs):
   """
@@ -475,21 +595,23 @@ def spec_from_sdss_fits(fname, **kwargs):
   ivar[ivar==0.] = 0.001
   err = 1/np.sqrt(ivar)
   name = os.path.splitext(os.path.basename(fname))[0]
-  return Spectrum(lam, flux, err, name=name)*1e-17
+  return Spectrum(lam, flux, err, name, 'vac')*1e-17
 
-def spectra_mean(spectra):
+def spectra_mean(SS):
   """
   Calculate the weighted mean spectrum of a list/tuple of spectra.
   All spectra should have identical wavelengths.
   """
-  for S in spectra:
+  for S in SS:
     assert isinstance(S, Spectrum)
-    assert len(S) == len(spectra[0])
-    assert np.isclose(S.x, spectra[0].x).all()
+    assert len(S) == len(SS[0])
+    assert np.isclose(S.x, SS[0].x).all()
+    assert S.x_unit == SS[0].x_unit
+    assert S.y_unit == SS[0].y_unit
 
-  X, Y, E = np.array([S.x for S in spectra]), \
-            np.array([S.y for S in spectra]), \
-            np.array([S.e for S in spectra])
+  X, Y, E = np.array([S.x for S in SS]), \
+            np.array([S.y for S in SS]), \
+            np.array([S.e for S in SS])
 
   Xbar, Ybar, Ebar = np.mean(X,axis=0), \
                      np.sum(Y/E**2, axis=0)/np.sum(1/E**2, axis=0), \
@@ -508,7 +630,7 @@ def voigt( x, x0, fwhm_g, fwhm_l ):
   z = ((x-x0) + 0.5j*fwhm_l)/(sigma*Vb)
   return wofz(z).real/(sigma*Vc)
 
-def sdss_mag_to_flux( ew, mag, mag_err, offset ):
+def sdss_mag_to_flux(ew, mag, mag_err, offset):
   """
   Converts an SDSS filter to a flux in Janskys/c. Offset is required to go
   from SDSS mags to AB mags. This should be 0.04 for u, else 0.
@@ -525,7 +647,7 @@ def sdss_mag_to_flux( ew, mag, mag_err, offset ):
     
 #
 
-def mag_calc_AB( w, f, e, filt, NMONTE=1000 ):
+def mag_calc_AB(x, y, e, filt, NMONTE=1000, Ifun=Itrapz):
   """
   Calculates the synthetic AB magnitude of a spectrum for a given filter.
   If NMONTE is > 0, monte-carlo error propagation is performed outputting
@@ -536,9 +658,11 @@ def mag_calc_AB( w, f, e, filt, NMONTE=1000 ):
 
   Johnson: ['U','B','V','R','I']
 
-  Galex:   'GalexNUV'
+  Gaia:    ['GaiaG', 'GaiaBp', GaiaRp']
 
-  Denis:   'DenisI'
+  Galex:   ['GalexFUV' 'GalexNUV']
+
+  Denis:   ['DenisI']
 
   2Mass:   ['2mJ','2mH','2mK']
 
@@ -550,188 +674,57 @@ def mag_calc_AB( w, f, e, filt, NMONTE=1000 ):
   #load filter
   long_path = "/home/astro/phujdu/Python/MH/mh/spectra/filt_profiles/"
   if   filt in 'ugriz':
-    full_path = long_path+"SLOAN_SDSS."+filt+".dat"
+    end_path = f"SLOAN_SDSS.{filt}.dat"
   elif filt in 'UBVRI':
-    full_path = long_path+"Generic_Johnson."+filt+".dat"
-  elif filt == 'GalexNUV':
-    full_path = long_path+"GALEX_GALEX.NUV.dat"
+    end_path = f"Generic_Johnson.{filt}.dat"
+  elif filt in ['Gaia'+b for b in 'G,Bp,Rp'.split(',')]:
+    fdict = {"Gaia"+k:v for k,v in zip(("G","Bp","Rp"), ("","bp","rp"))}
+    end_path = f"GAIA_GAIA2r.G{fdict[filt]}.dat"
+  elif filt in ['GalexFUV','GalexNUV']:
+    fdict = {"Galex"+k:k for k in ("NUV","FUV")}
+    end_path = f"GALEX_GALEX.{fdict[filt]}.dat"
   elif filt == 'DenisI':
-    full_path = long_path+"DENIS_DENIS.I.dat"
+    end_path = "DENIS_DENIS.I.dat"
   elif filt in ['2m'+b for b in 'JHK']:
-    full_path = long_path+"2MASS_2MASS."+filt[-1]+".dat"
+    end_path = f"2MASS_2MASS.{filt[-1]}.dat"
   elif filt in ['UK'+b for b in 'YJHK']:
-    full_path = long_path+"UKIRT_UKIDSS."+filt[-1]+".dat"
+    end_path = f"UKIRT_UKIDSS.{filt[-1]}.dat"
   elif filt in ['W'+b for b in '12']:
-    full_path = long_path+"WISE_WISE."+filt+".dat"
+    end_path = f"WISE_WISE.{filt}.dat"
   elif filt in ['S'+b for b in '12']:
-    full_path = long_path+"Spitzer_IRAC.I"+filt[1]+".dat"
+    end_path = f"Spitzer_IRAC.I{filt[1]}.dat"
   else:
-    raise ValueError( 'Invalid filter name: %s'%filt )
+    raise ValueError('Invalid filter name: {}'.format(filt))
 
-  w_filt, R_filt = np.loadtxt( full_path, unpack=True )
+  x_filt, R_filt = np.loadtxt(long_path+end_path, unpack=True)
 
   #clip original data to filter range and remove bad flux
-  w_slice = ( w > w_filt[0] ) & ( w < w_filt[-1] )
-  e_good =  e/np.median(e) < 5.
-  w, f, e = [arr[w_slice&e_good] for arr in (w, f, e)]
+  x_slice = (x > x_filt[0]) & (x < x_filt[-1])
+  e_good =  True #e/np.median(e) < 5.
+  x, y, e = tuple(arr[x_slice&e_good] for arr in (x, y, e))
 
   #calculate the pivot wavelength
-  dw = differentiate_axis( w_filt )
-  w_piv = np.sqrt(np.sum(R_filt * w_filt * dw)/np.sum(R_filt / w_filt * dw))
+  x_piv = np.sqrt(Ifun(R_filt * x_filt, x_filt)/Ifun(R_filt/x_filt, x_filt))
 
   #interpolate filter to new w axis
-  R_func = interp1d(w_filt, R_filt)  
-  R_filt = R_func(w)
+  R_filt = interp1d(x_filt, R_filt)(x)
 
-  #calculate wavelength step. matches original axis length
-  dw = differentiate_axis(w)
+  def m_AB_int(x, y, R_filt, x_piv):
+    y_l = Ifun(x*R_filt*y, x)/Ifun(x*R_filt, x) 
+    y_nu = y_l * x_piv**2 * 3.335640952e4
+    m = -2.5 * np.log10(y_nu) + 8.90
+    return m
 
   #calculate f_nu at w_piv via monte carlo
   if NMONTE == 0:
-      f_l = np.sum(w * R_filt * f * dw)/np.sum(w * R_filt *dw) 
-      f_nu = f_l * w_piv**2 * 3.335640952e4
-      m = -2.5 * np.log10(f_nu) + 8.90
-      return m #no error if NMONTE=0
+    return m_AB_int(x, y, R_filt, x_piv)
   else:
-    m = np.empty( NMONTE, "float64" )
-    for i in range(NMONTE):
-      f_monte = np.random.normal(f, e)
-      f_l = np.sum(w * R_filt * f_monte * dw)/np.sum(w * R_filt *dw) 
-      f_nu = f_l * w_piv**2 * 3.335640952e4
-      m[i] = -2.5 * np.log10(f_nu) + 8.90
-
+    y_mc = lambda y, e: np.random.normal(y, e)
+    m = np.array([m_AB_int(x, y_mc(y, e), R_filt, x_piv) for i in range(NMONTE)])
     return np.mean(m), np.std(m)
 #
 
-def mag_calc_AB2( w, f, e, filter ):
-  """
-  Calculates the synthetic AB magnitude of a spectrum.
-  Uses a monte carlo approach to calculate errors assuming
-  no covariance between adjacent wavelength elements.
-  """
-
-  #load filter
-  long_path = "/home/astro/phujdu/Python/MH/mh/spectra/"
-  if   filter in ['u','g','r','i','z']:
-    full_path = long_path+"SLOAN_SDSS."+filter+".dat"
-  elif filter in ['U','B','V','R','I']:
-    full_path = long_path+"Generic_Johnson."+filter+".dat"
-  else:
-    print("bad filter name")
-    exit()
-  w_filt, R_filt = np.loadtxt( full_path, unpack=True )
-
-  #clip original data to filter range and remove bad flux
-  w_slice = ( w > w_filt[0] ) & ( w < w_filt[-1] )
-  e_good =  e/np.median(e) < 5.
-  w = w[w_slice&e_good]
-  f = f[w_slice&e_good]
-  e = e[w_slice&e_good]
-
-  #interpolate filter to new w axis
-  R_func = interp1d( w_filt, R_filt )  
-  R_filt = R_func( w )
-
-  #calculate wavelength step. matches original axis length
-  dw = differentiate_axis( w )
-
-  #calculate magnitudes in a monte carlo way
-  NMONTE = 1000
-  m = np.empty( NMONTE, "float64" )
-  for i in range(NMONTE):
-    f_monte = np.random.normal( f, e )
-    f_jansk = 3631. * 2.99792458e-5/w**2
-    top_integral = np.sum( f_monte * R_filt * dw )
-    bot_integral = np.sum( f_jansk * R_filt * dw ) 
-    m[i] = -2.5 * np.log10( top_integral/bot_integral )
-
-  return np.mean( m ), np.std( m )
-#
-
-def mag_calc_AB_bootstrap( w, f, e, filter ):
-  """
-  Calculates the synthetic AB magnitude of a spectrum.
-  Uses a bootstrap approach to calculate errors.
-  """
-
-  #load filter
-  long_path = "/home/astro/phujdu/Python/MH/mh/spectra/"
-  if   filter in ['u','g','r','i','z']:
-    full_path = long_path+"SLOAN_SDSS."+filter+".dat"
-  elif filter in ['U','B','V','R','I']:
-    full_path = long_path+"Generic_Johnson."+filter+".dat"
-  elif filter == "GALEX_NUV":
-    full_path = long_path+"GALEX_GALEX.NUV.dat"
-  else:
-    print("bad filter name")
-    exit()
-  w_filt, R_filt = np.loadtxt( full_path, unpack=True )
-
-  #clip original data to filter range and remove bad flux
-  w_slice = ( w > w_filt[0] ) & ( w < w_filt[-1] )
-  e_good =  e/np.median(e) < 5.
-  w = w[w_slice&e_good]
-  f = f[w_slice&e_good]
-  e = e[w_slice&e_good]
-
-  #calculate the pivot wavelength
-  dw = differentiate_axis( w_filt )
-  w_piv = np.sqrt(np.sum(R_filt * w_filt * dw)/np.sum(R_filt / w_filt * dw))
-
-  #interpolate filter to new w axis
-  R_filt = interp1d( w_filt, R_filt )( w )
-
-  #calculate wavelength step. matches original axis length
-  dw = differentiate_axis( w )
-
-  #calculate f_nu at w_piv via bootstrap
-  NBOOT = 5000
-  m = np.empty( NBOOT, "float64" )
-  for i in range(NBOOT):
-    resample = np.random.randint( 0, len(w), len(w) )
-    f_l = np.sum( (w*R_filt*f*dw)[resample] )/np.sum( (w*R_filt*dw)[resample] )
-    f_nu = f_l * w_piv**2 * 3.335640952e4
-    m[i] = -2.5 * np.log10( f_nu ) + 8.90
-
-  return np.mean( m ), np.std( m )
-#
-
-def lambda_piv( filter ):
-  #load filter
-  long_path = "/home/astro/phujdu/Python/MH/mh/spectra/"
-  if   filter in ['u','g','r','i','z']:
-    full_path = long_path+"SLOAN_SDSS."+filter+".dat"
-  elif filter in ['U','B','V','R','I']:
-    full_path = long_path+"Generic_Johnson."+filter+".dat"
-  else:
-    print("bad filter name")
-    exit()
-  w_filt, R_filt = np.loadtxt( full_path, unpack=True )
-
-  #calculate wavelength step. matches original axis length
-  dw = differentiate_axis( w )
-
-  #calculate the pivot wavelength
-  return np.sqrt(np.sum(R_filt* w_filt * dw)/np.sum(R_filt / w_filt * dw))
-#
-
-def differentiate_axis( x ):
-  """
-  for an axis x, this calculates dx from:
-
-  dx_i = 0.5*( x_i+1 - x_i-1 )
-
-  dx_0 and dx_N are copies of dx_1 and dx_N-1 respectively
-  """
-
-  dx = 0.5 * ( x[2:] - x[:-2] )
-  dx0 = np.array( (dx[ 0],) )
-  dxN = np.array( (dx[-1],) )
-  dx = np.hstack( (dx0,dx,dxN) )
-  return dx
-#
-
-def vac_to_air( Wvac ):
+def vac_to_air(Wvac):
   """
   converts vacuum wavelengths to air wavelengths,
   as per VALD3 documentation (in Angstroms)
@@ -858,18 +851,15 @@ def sky_line_fwhm( w, sky, w0 ):
   return vec[2] * 2.355
 #
 
-def keep_points( x, fname ):
+def keep_points(x, fname):
   """
   creates a mask for a spectrum that regions between pairs from a file
   """
-  C = np.zeros_like(x,dtype='bool')
   try:
     lines = open(fname,'r').readlines()
   except IOError:
     print("file %s does not exist" %fname)
     exit()
-  for line in lines:
-    s1, s2 = line.split()
-    x1,x2 = float(s1),float(s2)
-    C |= (x>x1)&(x<x2)
-  return C
+  between = lambda x, x1, x2: (x>float(x1))&(x<float(x2))
+  segments = (between(x, *line.split()) for line in lines)
+  return reduce(operator.or_, segments)
