@@ -10,6 +10,7 @@ from scipy.special import wofz
 from scipy.integrate import trapz as Itrapz, simps as Isimps
 from astropy.io import fits
 from functools import reduce
+from trm import molly
 import operator
 import os
 import math
@@ -18,7 +19,6 @@ import astropy.constants as const
 
 jangstrom = \
   "$\mathrm{erg}\;\mathrm{s}^{-1}\,\mathrm{cm}^{-2}\,\mathrm{\AA}^{-1}$"
-fitskeys = ('loglam', 'flux', 'ivar')
 
 ###############################################################################
 
@@ -47,25 +47,69 @@ class Spectrum(object):
 
   .............................................................................
   """
-  __slots__ = ['name', 'x', 'y', 'e', 'wave', 'x_unit', 'y_unit']
-  def __init__(self, x, y, e, name="", wave='air', x_unit="AA", y_unit="erg/(s cm^2 AA)"):
+  __slots__ = ['name', 'head', 'x', 'y', 'e', 'wave', 'x_unit', 'y_unit']
+  def __init__(self, x, y, e, name="", wave='air', x_unit="AA", y_unit="erg/(s cm^2 AA)", head=None):
     """
-    Initialise spectrum
+    Initialise spectrum. Arbitrary header items can be added to self.head
     """
     assert isinstance(x, np.ndarray)
     assert isinstance(y, np.ndarray)
     assert isinstance(e, np.ndarray)
-    assert isinstance(name, str)
     assert x.ndim == y.ndim == e.ndim == 1
     assert len(x) == len(y) == len(e)
     assert np.all(e >= 0.)
+    assert isinstance(name, str)
+    assert wave in ("air", "vac")
+    self.x = x
+    self.y = y
+    self.e = e
     self.name = name
     self.wave = wave
     self.x_unit = u.Unit(x_unit).to_string()
     self.y_unit = u.Unit(y_unit).to_string()
-    self.x = x
-    self.y = y
-    self.e = e
+    if head is None:
+      self.head = {}
+    else:
+      assert isinstance(head, dict)
+      self.head = head
+
+  @property
+  def var(self):
+    """
+    Variance property attribute from flux errors
+    """
+    return self.e**2
+
+  @property
+  def ivar(self):
+    """
+    Inverse variance attribute from flux errors
+    """
+    return 1.0/self.var
+
+  @property
+  def SN(self):
+    """
+    Signal to noise ratio
+    """
+    return self.y/self.e
+
+  @property
+  def data(self):
+    """
+    Returns all three arrays as a tuple. Useful for creating new spectra, e.g.
+    >>> Spectrum(*S.data)
+    """
+    return self.x, self.y, self.e
+
+  @property
+  def info(self):
+    """
+    Returns non-array attributes (in same order as __init__). This can be passed
+    used to create new spectra with the same information, e.g.
+    >>> Spectrum(x, y, e, *S.info)
+    """
+    return self.name, self.wave, self.x_unit, self.y_unit, self.head
 
   def __len__(self):
     """
@@ -97,7 +141,7 @@ class Spectrum(object):
       if isinstance(key, int):
         return indexed_data
       else:
-        return Spectrum(*indexed_data, self.name, self.wave, self.x_unit, self.y_unit)
+        return Spectrum(*indexed_data, *self.info)
     else:
       raise TypeError
 
@@ -105,7 +149,7 @@ class Spectrum(object):
     """
     Return iterator of spectrum
     """
-    return zip(self.x, self.y, self.e)
+    return zip(*self.data)
 
   def __add__(self, other):
     """
@@ -114,9 +158,9 @@ class Spectrum(object):
     if isinstance(other, (int, float, np.ndarray)):
       if isinstance(other, np.ndarray):
         assert len(self) == len(other)
-      x2 = self.x * 1.
+      x2 = self.x.copy()
       y2 = self.y + other
-      e2 = self.e * 1.
+      e2 = self.e.copy()
     elif isinstance(other, Spectrum):
       assert len(self) == len(other)
       assert np.all(np.isclose(self.x, other.x))
@@ -127,7 +171,7 @@ class Spectrum(object):
       e2 = np.hypot(self.e, other.e)
     else:
       raise TypeError
-    return Spectrum(x2, y2, e2, self.name, self.wave, self.x_unit, self.y_unit)
+    return Spectrum(x2, y2, e2, *self.info)
 
   def __sub__(self, other):
     """
@@ -135,9 +179,9 @@ class Spectrum(object):
     """
     if isinstance(other, (int, float, np.ndarray)):
       if isinstance(other, np.ndarray): assert len(self) == len(other)
-      x2 = self.x * 1.
+      x2 = self.x.copy()
       y2 = self.y - other
-      e2 = self.e * 1.
+      e2 = self.e.copy()
     elif isinstance(other, Spectrum):
       assert len(self) == len(other)
       assert np.all(np.isclose(self.x, other.x))
@@ -148,7 +192,7 @@ class Spectrum(object):
       e2 = np.hypot(self.e, other.e)
     else:
       raise TypeError
-    return Spectrum(x2, y2, e2, self.name, self.wave, self.x_unit, self.y_unit)
+    return Spectrum(x2, y2, e2, *self.info)
       
   def __mul__(self, other):
     """
@@ -156,7 +200,7 @@ class Spectrum(object):
     """
     if isinstance(other, (int, float, np.ndarray)):
       if isinstance(other, np.ndarray): assert len(self) == len(other)
-      x2 = self.x * 1.
+      x2 = self.x.copy()
       y2 = self.y * other
       e2 = self.e * np.abs(other)
       y_unit = self.y_unit
@@ -171,7 +215,9 @@ class Spectrum(object):
       y_unit = (u1*u2).to_string()
     else:
       raise TypeError
-    return Spectrum(x2, y2, e2, self.name, self.wave, self.x_unit, y_unit)
+    S = Spectrum(x2, y2, e2, *self.info)
+    S.y_unit = y_unit
+    return S
 
   def __truediv__(self, other):
     """
@@ -179,7 +225,7 @@ class Spectrum(object):
     """
     if isinstance(other, (int, float, np.ndarray)):
       if isinstance(other, np.ndarray): assert len(self) == len(other)
-      x2 = self.x * 1.
+      x2 = self.x.copy()
       y2 = self.y / other
       e2 = self.e / np.abs(other)
       y_unit = self.y_unit
@@ -194,19 +240,21 @@ class Spectrum(object):
       y_unit = (u1/u2).to_string()
     else:
       raise TypeError
-    return Spectrum(x2, y2, e2, self.name, self.wave, self.x_unit, y_unit)
+    S = Spectrum(x2, y2, e2, *self.info)
+    S.y_unit = y_unit
+    return S
 
   def __pow__(self,other):
     """
     Return S**other (with standard error propagation)
     """
     if isinstance(other, (int, float)):
-      x2 = self.x * 1.
+      x2 = self.x.copy()
       y2 = self.y**other
       e2 = other * y2 * self.e/self.y
     else:
       raise TypeError
-    return Spectrum(x2, y2, e2, self.name, self.wave, self.x_unit, self.y_unit)
+    return Spectrum(x2, y2, e2, *self.info)
 
   def __radd__(self, other):
     """
@@ -232,13 +280,15 @@ class Spectrum(object):
     """
     if isinstance(other, (int, float, np.ndarray)):
       if isinstance(other, np.ndarray): assert len(self) == len(other)
-      x2 = self.x * 1.
+      x2 = self.x.copy()
       y2 = other / self.y
       e2 = other * self.e /(self.y*self.y)
     else:
       raise TypeError
     y_unit = (1/u.Unit(self.y_unit)).to_string()
-    return Spectrum(x2, y2, e2, self.name, self.wave, self.x_unit, y_unit)
+    S = Spectrum(x2, y2, e2, *self.info)
+    S.y_unit = y_unit
+    return S
 
   def __neg__(self):
     """
@@ -256,8 +306,9 @@ class Spectrum(object):
     """
     Implements abs(self)
     """
-    return Spectrum(self.x, abs(self.y), self.e, self.name, self.wave, self.x_unit, self.y_unit)
-
+    S = self.copy()
+    S.y = np.abs(S.y)
+    return S
 
   def apply_mask(self, mask):
     """
@@ -266,6 +317,14 @@ class Spectrum(object):
     self.x = np.ma.masked_array(self.x, mask)
     self.y = np.ma.masked_array(self.y, mask)
     self.e = np.ma.masked_array(self.e, mask)
+
+  def remove_mask(self, mask):
+    """
+    Apply a mask to the spectral fluxes
+    """
+    self.x = np.array(self.x)
+    self.y = np.array(self.y)
+    self.e = np.array(self.e)
 
   def mag_calc_AB(self, filt, NMONTE=1000):
     """
@@ -279,9 +338,9 @@ class Spectrum(object):
     S.y_unit_to("erg/(s cm2 AA)")
 
     if np.all(self.e == 0):
-      return mag_calc_AB(S.x, S.y, S.y*1e-9, filt, NMONTE=0)
+      return mag_calc_AB(S, filt, NMONTE=0)
     else:
-      return mag_calc_AB(S.x, S.y, S.e, filt, NMONTE=NMONTE)
+      return mag_calc_AB(S, filt, NMONTE=NMONTE)
 
   def interp_wave(self, X, kind='linear', **kwargs):
     """
@@ -302,19 +361,21 @@ class Spectrum(object):
     else:
       raise TypeError
     if kind == "Akima":
-      pass
       y2 = Ak_i(self.x, self.y)(x2)
-      e2 = Ak_i(self.x, self.y)(x2)
+      e2 = Ak_i(self.x, self.e)(x2)
       nan = np.isnan(y2) | np.isnan(e2)
       y2[nan] = 0.
       e2[nan] = 0.
+    elif kind == "sinc":
+      y2 = Lanczos(self.x, self.y, X)
+      e2 = Lanczos(self.x, self.e, X)
     else:
       extrap_y, extrap_e = (self.y[0],self.y[-1]), (self.e[0],self.e[-1])
       y2 = interp1d(self.x, self.y, kind=kind, \
         bounds_error=False, fill_value=0., **kwargs)(x2)
       e2 = interp1d(self.x, self.e, kind=kind, \
-        bounds_error=False, fill_value=0., **kwargs)(x2)
-    return Spectrum(x2, y2, e2, self.name, self.wave, self.x_unit, self.y_unit)
+        bounds_error=False, fill_value=np.inf, **kwargs)(x2)
+    return Spectrum(x2, y2, e2, *self.info)
 
   def copy(self):
     """
@@ -391,6 +452,22 @@ class Spectrum(object):
     else:
       raise ValueError
 
+  def redden(self, E_BV, Rv=3.1):
+    """
+    Apply the CCM reddening curve to the spectrum given an E_BV
+    and a value of Rv (default=3.1).
+    """
+    S = self.copy()
+    if S.wave == "air":
+      S.x_unit_to("AA")
+      S.air_to_vac()
+    S.x_unit_to("1/um")
+
+    A = Rv * E_BV * A_curve(S.x, Rv)
+    extinction = 10**(-0.4*A)
+    self.y *= extinction
+    self.e *= extinction
+
   def x_unit_to(self, new_unit):
     """
     Changes units of the x-data. Supports conversion between wavelength
@@ -410,14 +487,18 @@ class Spectrum(object):
     """
     assert isinstance(new_unit, str)
 
-    x = self.x * u.Unit(self.x_unit)
-    y = self.y * u.Unit(self.y_unit)
-    e = self.e * u.Unit(self.y_unit)
-    y = y.to(new_unit, u.spectral_density(x))
-    e = e.to(new_unit, u.spectral_density(x))
-    self.y = y.value
-    self.e = e.value
-    self.y_unit = u.Unit(new_unit).to_string()
+    if new_unit == "mag":
+      self.to_y_unit("Jy")
+      self /= 3631
+    else:
+      x = self.x * u.Unit(self.x_unit)
+      y = self.y * u.Unit(self.y_unit)
+      e = self.e * u.Unit(self.y_unit)
+      y = y.to(new_unit, u.spectral_density(x))
+      e = e.to(new_unit, u.spectral_density(x))
+      self.y = y.value
+      self.e = e.value
+      self.y_unit = u.Unit(new_unit).to_string()
     
   def apply_redshift(self, v, v_unit="km/s"):
     """
@@ -438,7 +519,7 @@ class Spectrum(object):
     else:
       raise ValueError("self.wave should be in ['vac', 'air']")
 
-  def scale_model(self, S_in, return_scaling_factor=False):
+  def scale_model(self, other, return_scaling_factor=False):
     """
     If self is model spectrum (errors are presumably zero), and S is a data
     spectrum (has errors) then this reproduces a scaled version of M2.
@@ -448,15 +529,36 @@ class Spectrum(object):
     the model to share the same wavelengths, use model.interp_wave(),
     either before or after calling this function.
     """
-    assert isinstance(S_in, Spectrum)
-    assert self.x_unit == S_in.x_unit
-    assert self.y_unit == S_in.y_unit
+    assert isinstance(other, Spectrum)
+    assert self.x_unit == other.x_unit
+    assert self.y_unit == other.y_unit
 
     #if M and S already have same x-axis, this won't do much.
-    S = S_in[S_in.e>0]
+    S = other[other.e>0]
     M = self.interp_wave(S)
 
-    A_sm, A_mm = np.sum(S.y*M.y/S.e**2), np.sum((M.y/S.e)**2)
+    A_sm, A_mm = np.sum(S.y*M.y*S.ivar), np.sum(M.y**2*S.ivar)
+    A = A_sm/A_mm
+
+    if return_scaling_factor:
+      return self*A, A
+    else:
+      return self*A
+    
+  def scale_model_to_model(self, other, return_scaling_factor=False):
+    """
+    Similar to scale_model, but for scaling one model to another. Essentially
+    this is for the case when the argument doesn't have errors.
+    """
+    assert isinstance(other, Spectrum)
+    assert self.x_unit == other.x_unit
+    assert self.y_unit == other.y_unit
+
+    #if M and S already have same x-axis, this won't do much.
+    S = other
+    M = self.interp_wave(S)
+
+    A_sm, A_mm = np.sum(S.y*M.y), np.sum(M.y)
     A = A_sm/A_mm
 
     if return_scaling_factor:
@@ -465,10 +567,14 @@ class Spectrum(object):
       return self*A
     
   def convolve_gaussian(self, fwhm):
-    self.y = convolve_gaussian(self.x, self.y, fwhm)
+    S = self.copy()
+    S.y = convolve_gaussian(S.x, S.y, fwhm)
+    return S
 
   def convolve_gaussian_R(self, res):
-    self.y = convolve_gaussian_R(self.x, self.y, res)
+    S = self.copy()
+    S.y = convolve_gaussian_R(S.x, S.y, res)
+    return S
 
   def split(self, W):
     """
@@ -504,28 +610,42 @@ class Spectrum(object):
 
 #..............................................................................
 
+def ZeroSpectrum(x, name="", wave='air', x_unit="AA", y_unit="erg/(s cm^2 AA)", head=None):
+  y = np.zeros_like(x)
+  e = np.zeros_like(x)
+  return Spectrum(x, y, e, name=name, wave=wave, x_unit=x_unit, y_unit=y_unit, head=head)
+
+def UnitSpectrum(x, name="", wave='air', x_unit="AA", head=None):
+  y = np.ones_like(x)
+  e = np.zeros_like(x)
+  return Spectrum(x, y, e, name=name, wave=wave, x_unit=x_unit, y_unit="", head=head)
+
 def join_spectra(SS, sort=False, name=None):
   """
   Joins a collection of spectra into a single spectrum. The name of the first
   spectrum is used as the new name. Can optionally sort the new spectrum by
   wavelengths.
   """
-  if name == None: name = SS[0].name
+  S0 = SS[0]
   
   for S in SS:
     assert isinstance(S, Spectrum), 'item is not Spectrum'
-    assert S.wave == SS[0].wave
-    assert S.x_unit == SS[0].x_unit
-    assert S.y_unit == SS[0].y_unit
+    assert S.wave == S0.wave
+    assert S.x_unit == S0.x_unit
+    assert S.y_unit == S0.y_unit
 
-  wave = SS[0].wave
-  x_unit = SS[0].x_unit
-  y_unit = SS[0].y_unit
+  kwargs = {
+    'name'   : S0.name,
+    'wave'   : S0.wave,
+    'x_unit' : S0.x_unit,
+    'y_unit' : S0.y_unit,
+  }
+
 
   x = np.hstack(S.x for S in SS)
   y = np.hstack(S.y for S in SS)
   e = np.hstack(S.e for S in SS)
-  S = Spectrum(x, y, e, name, wave, x_unit, y_unit)
+  S = Spectrum(x, y, e, **kwargs)
   if sort:
     idx = np.argsort(x)
     return S[idx]
@@ -590,94 +710,78 @@ def spec_from_sdss_fits(fname, **kwargs):
   Loads a SDSS fits file as spectrum (result in vac wavelengths)
   """
   hdulist = fits.open(fname)
-  loglam, flux, ivar = [hdulist[1].data[key] for key in fitskeys]
+  loglam, flux, ivar = [hdulist[1].data[key] for key in ('loglam', 'flux', 'ivar')]
   lam = 10**loglam
   ivar[ivar==0.] = 0.001
   err = 1/np.sqrt(ivar)
   name = os.path.splitext(os.path.basename(fname))[0]
   return Spectrum(lam, flux, err, name, 'vac')*1e-17
 
+def spec_list_from_molly(fname):
+  """
+  Returns a list of spectra read in from a TRM molly file.
+  """
+  def convert_mol(molsp):
+    x, y, e = molsp.wave, molsp.f, molsp.fe
+    name = molsp.head['Object']
+    S = Spectrum(x, y, e, name, y_unit="mJy")
+    S.head = molsp.head
+    return S
+  
+  return [convert_mol(molsp) for molsp in molly.gmolly(fname)]
+
 def spectra_mean(SS):
   """
   Calculate the weighted mean spectrum of a list/tuple of spectra.
   All spectra should have identical wavelengths.
   """
+  S0 = SS[0]
   for S in SS:
     assert isinstance(S, Spectrum)
-    assert len(S) == len(SS[0])
-    assert np.isclose(S.x, SS[0].x).all()
-    assert S.x_unit == SS[0].x_unit
-    assert S.y_unit == SS[0].y_unit
+    assert len(S) == len(S0)
+    assert S.wave == S0.wave
+    assert np.isclose(S.x, S0.x).all()
+    assert S.x_unit == S0.x_unit
+    assert S.y_unit == S0.y_unit
 
-  X, Y, E = np.array([S.x for S in SS]), \
-            np.array([S.y for S in SS]), \
-            np.array([S.e for S in SS])
+  X, Y, IV = np.array([S.x    for S in SS]), \
+             np.array([S.y    for S in SS]), \
+             np.array([S.ivar for S in SS])
 
-  Xbar, Ybar, Ebar = np.mean(X,axis=0), \
-                     np.sum(Y/E**2, axis=0)/np.sum(1/E**2, axis=0), \
-                     1/np.sqrt(np.sum(1/E**2, axis=0))
+  Xbar  = np.mean(X,axis=0)
+  IVbar = np.sum(IV, axis=0)
+  Ybar  = np.sum(Y*IV, axis=0) * IVbar
+  Ebar  = 1.0 / np.sqrt(IVbar)
 
-  return Spectrum(Xbar, Ybar, Ebar)
+  kwargs = {
+    'name'   : S0.name,
+    'wave'   : S0.wave,
+    'x_unit' : S0.x_unit,
+    'y_unit' : S0.y_unit,
+  }
+
+  return Spectrum(Xbar, Ybar, Ebar, **kwargs)
     
 ###############################################################################
 
-Va = 1/(2*np.sqrt(2*np.log(2)))
-Vb = np.sqrt(2)
-Vc = np.sqrt(2*np.pi)
-
 def voigt( x, x0, fwhm_g, fwhm_l ):
-  sigma = Va*fwhm_g
-  z = ((x-x0) + 0.5j*fwhm_l)/(sigma*Vb)
-  return wofz(z).real/(sigma*Vc)
+  sigma = voigt.Va*fwhm_g
+  z = ((x-x0) + 0.5j*fwhm_l)/(sigma*voigt.Vb)
+  return wofz(z).real/(sigma*voigt.Vc)
+voigt.Va = 1/(2*np.sqrt(2*np.log(2)))
+voigt.Vb = np.sqrt(2)
+voigt.Vc = np.sqrt(2*np.pi)
 
-def sdss_mag_to_flux(ew, mag, mag_err, offset):
+def load_transmission_curve(filt):
   """
-  Converts an SDSS filter to a flux in Janskys/c. Offset is required to go
-  from SDSS mags to AB mags. This should be 0.04 for u, else 0.
+  Loads the filter curves obtained from VOSA (SVO).
   """
-  mag -= offset
-  F_nu = 10**( -0.4*mag -19.44 )
-  conversion_factor = 2.998e18/ew**2 #speed of light over lambda**2
-  F_lambda = conversion_factor*F_nu
-  if mag_err > 0:
-    F_err    = 0.4*F_lambda*mag_err
-    return F_lambda, F_err
-  else:
-    return F_lambda
-    
-#
-
-def mag_calc_AB(x, y, e, filt, NMONTE=1000, Ifun=Itrapz):
-  """
-  Calculates the synthetic AB magnitude of a spectrum for a given filter.
-  If NMONTE is > 0, monte-carlo error propagation is performed outputting
-  both a synthetic-mag and error. For model-spectra, i.e. no errors,
-  use e=np.ones_like(f) and NMONTE=0. List of currently supported filters:
-
-  SDSS:    ['u','g','r','i','z']
-
-  Johnson: ['U','B','V','R','I']
-
-  Gaia:    ['GaiaG', 'GaiaBp', GaiaRp']
-
-  Galex:   ['GalexFUV' 'GalexNUV']
-
-  Denis:   ['DenisI']
-
-  2Mass:   ['2mJ','2mH','2mK']
-
-  WISE:    ['W1','W2']
-
-  Spitzer: ['S1','S2']
-  """
-
-  #load filter
   long_path = "/home/astro/phujdu/Python/MH/mh/spectra/filt_profiles/"
   if   filt in 'ugriz':
     end_path = f"SLOAN_SDSS.{filt}.dat"
   elif filt in 'UBVRI':
     end_path = f"Generic_Johnson.{filt}.dat"
-  elif filt in ['Gaia'+b for b in 'G,Bp,Rp'.split(',')]:
+  elif filt in ['Gaia'+b for b in 'G Bp Rp'.split()]:
     fdict = {"Gaia"+k:v for k,v in zip(("G","Bp","Rp"), ("","bp","rp"))}
     end_path = f"GAIA_GAIA2r.G{fdict[filt]}.dat"
   elif filt in ['GalexFUV','GalexNUV']:
@@ -693,34 +797,71 @@ def mag_calc_AB(x, y, e, filt, NMONTE=1000, Ifun=Itrapz):
     end_path = f"WISE_WISE.{filt}.dat"
   elif filt in ['S'+b for b in '12']:
     end_path = f"Spitzer_IRAC.I{filt[1]}.dat"
+  elif filt in ['sm'+b for b in 'uvgriz']:
+    end_path = f"SkyMapper_SkyMapper.{filt[2]}.dat"
+  elif filt in ['ps'+b for b in 'grizy']:
+    end_path = f"PAN-STARRS_PS1.{filt[2]}.dat"
+  elif filt in ['sw'+b for b in 'U UVW1 UVW2 UVM1'.split()]:
+    end_path = f"Swift_UVOT.{filt[2:]}.dat"
   else:
     raise ValueError('Invalid filter name: {}'.format(filt))
+  return model_from_txt(long_path+end_path, x_unit="AA", y_unit="")
+#
 
-  x_filt, R_filt = np.loadtxt(long_path+end_path, unpack=True)
+def mag_calc_AB(S, filt, NMONTE=1000, Ifun=Itrapz):
+  """
+  Calculates the synthetic AB magnitude of a spectrum for a given filter.
+  If NMONTE is > 0, monte-carlo error propagation is performed outputting
+  both a synthetic-mag and error. For model-spectra, i.e. no errors,
+  use e=np.ones_like(f) and NMONTE=0. List of currently supported filters:
 
-  #clip original data to filter range and remove bad flux
-  x_slice = (x > x_filt[0]) & (x < x_filt[-1])
-  e_good =  True #e/np.median(e) < 5.
-  x, y, e = tuple(arr[x_slice&e_good] for arr in (x, y, e))
+  2Mass:     ['2mJ','2mH','2mK']
 
-  #calculate the pivot wavelength
-  x_piv = np.sqrt(Ifun(R_filt * x_filt, x_filt)/Ifun(R_filt/x_filt, x_filt))
+  Denis:     ['DenisI']
 
-  #interpolate filter to new w axis
-  R_filt = interp1d(x_filt, R_filt)(x)
+  Gaia:      ['GaiaG', 'GaiaBp', GaiaRp']
 
-  def m_AB_int(x, y, R_filt, x_piv):
-    y_l = Ifun(x*R_filt*y, x)/Ifun(x*R_filt, x) 
-    y_nu = y_l * x_piv**2 * 3.335640952e4
+  Galex:     ['GalexFUV' 'GalexNUV']
+
+  Johnson:   ['U','B','V','R','I']
+
+  PanSTARRS: ['ps(grizy)']
+
+  SDSS:      ['u','g','r','i','z']
+
+  Spitzer:   ['S1','S2']
+
+  Skymapper: ['sm(uvgriz)']
+
+  Swift:     ['sw(U,UVW1,UVW2,UVM1)']
+
+  WISE:      ['W1','W2']
+  """
+
+  #load filter
+  R = load_transmission_curve(filt)
+  R.wave = S.wave
+
+  #Convert Spectra/filter-curve to Hz/Jy for integrals
+  R.x_unit_to("Hz")
+  S.x_unit_to("Hz")
+  S.y_unit_to("Jy")
+
+  #clip data to filter range and interpolate filter to data axis
+  S = S.clip(np.min(R.x), np.max(R.x))
+  R = R.interp_wave(S)
+
+  #Calculate AB magnitudes, potentially including flux errors
+  def m_AB_int(X, Y, R):
+    y_nu = Ifun(Y*R/X, X)/Ifun(R/X, X) 
     m = -2.5 * np.log10(y_nu) + 8.90
     return m
 
-  #calculate f_nu at w_piv via monte carlo
   if NMONTE == 0:
-    return m_AB_int(x, y, R_filt, x_piv)
+    return m_AB_int(S.x, S.y, R.y)
   else:
-    y_mc = lambda y, e: np.random.normal(y, e)
-    m = np.array([m_AB_int(x, y_mc(y, e), R_filt, x_piv) for i in range(NMONTE)])
+    y_mc = lambda S: np.random.normal(S.y, S.e)
+    m = np.array([m_AB_int(S.x, y_mc(S), R.y) for i in range(NMONTE)])
     return np.mean(m), np.std(m)
 #
 
@@ -748,24 +889,6 @@ def air_to_vac( Wair ):
   return Wair*n
 #
 
-def sdss_mag2fl( w, ugriz, ugrizErr=None ):
-  ugriz[0] -= 0.04
-  F_nu = 10**( -0.4*ugriz -19.44 )
-  conversion_factor = 2.998e18/w**2 #speed of light over lambda**2
-  F_lambda = conversion_factor*F_nu
-  if ugrizErr is None:
-    return F_lambda
-  else:
-    F_err    = 0.9210340372*F_lambda*ugrizErr
-    return F_lambda, F_err
-#
-
-def next_pow_2(N_in):
-  N_out = 1
-  while N_out < N_in:
-    N_out *= 2
-  return N_out
-
 def convolve_gaussian(x, y, FWHM):
   """
   Convolve spectrum with a Gaussian with FWHM by oversampling and
@@ -774,6 +897,12 @@ def convolve_gaussian(x, y, FWHM):
   the end of the spectrum.
   """
   sigma = FWHM/2.355
+
+  def next_pow_2(N_in):
+    N_out = 1
+    while N_out < N_in:
+      N_out *= 2
+    return N_out
 
   #oversample data by at least factor 10 (up to 20).
   xi = np.linspace(x[0], x[-1], next_pow_2(10*len(x)))
@@ -799,7 +928,7 @@ def convolve_gaussian_R(x, y, R):
   return convolve_gaussian(np.log(x), y, 1./R)
 #
 
-def black_body( x, T, norm=True ):
+def black_body(x, T, norm=True):
   """
   x in angstroms
   T in Kelvin
@@ -816,6 +945,27 @@ def black_body( x, T, norm=True ):
   if norm:
     logf -= logf.max() #normalise to peak at 1.
   return np.exp( logf )
+#
+
+def Black_body(x, T, wave='air', x_unit="AA", y_unit="erg/(s cm2 AA)", norm=True):
+  """
+  Returns a Black body curve like black_body(), but the return value
+  is a Spectrum class.
+  """
+  zero_flux = np.zeros_like(x)
+  M = Spectrum(x, zero_flux, zero_flux, f'{T}K BlackBody', wave, x_unit, y_unit)
+  M.x_unit_to("AA")
+  M.y_unit_to("erg/(s cm2 AA)")
+  if wave=='air':
+    M.air_to_vac()
+  M.y = black_body(M.x, T, False)
+  if wave=='air':
+    M.vac_to_air()
+  M.x_unit_to(x_unit)
+  M.y_unit_to(y_unit)
+  if norm:
+    M /= M.y.max()
+  return M
 #
 
 def sky_residual(params, x, y, e ):
@@ -863,3 +1013,68 @@ def keep_points(x, fname):
   between = lambda x, x1, x2: (x>float(x1))&(x<float(x2))
   segments = (between(x, *line.split()) for line in lines)
   return reduce(operator.or_, segments)
+
+def A_curve(x, R=3.1):
+  """
+  Calculate CCM 1989 extinction curve. x is in units of 1/um.
+  """
+  def Av_IR(x):
+    """
+    0.3 <= x/um < 1.1
+    """
+    a = 0.574 * x**1.61
+    b =-0.527 * x**1.61
+    return a, b
+
+  def Av_opt(x):
+    """
+    1.1 <= x/um < 3.3
+    """
+    y = x-1.82
+    poly_a = [1, +0.17699, -0.50447, -0.02427, +0.72085, +0.01979, -0.77530, +0.32999][::-1]
+    poly_b = [0, +1.41338, +2.28305, +1.07233, -5.38434, -0.62251, +5.30260, -2.09002][::-1]
+    a = np.polyval(poly_a, y)
+    b = np.polyval(poly_b, y)
+    return a, b
+
+  def Av_UV(x):
+    """
+    3.3 <= x/um < 8.0
+    """
+    poly_Fa = [0, 0, -0.04473, -0.009779][::-1]
+    poly_Fb = [0, 0, +0.21300, +0.120700][::-1]
+    Fa = np.polyval(poly_Fa, x-5.9)
+    Fb = np.polyval(poly_Fb, x-5.9)
+    if isinstance(x, np.ndarray):
+      Fa[x < 5.9] = 0
+      Fb[x < 5.9] = 0
+    elif isinstance(x, (int, float)):
+      if x < 5.9:
+        Fa = Fb = 0
+    else:
+      raise TypeError
+    a =  1.752 - 0.316*x - 0.104/((x-4.67)**2 + 0.341) + Fa
+    b = -3.090 + 1.825*x + 1.206/((x-4.62)**2 + 0.263) + Fb
+    return a, b
+
+  FIR = (x < 0.3)
+  IR  = (x >= 0.3) & (x<1.1)
+  opt = (x >= 1.1) & (x<3.3)
+  UV  = (x >= 3.3) & (x<8.0)
+  FUV = (x >= 8.0)
+
+  a = np.zeros_like(x)
+  b = np.zeros_like(x)
+  a[IR ], b[IR ] = Av_IR( x[IR ])
+  a[opt], b[opt] = Av_opt(x[opt])
+  a[UV ], b[UV ] = Av_UV( x[UV ])
+  a[FIR], b[FIR] = Av_IR(0.3)
+  a[FUV], b[FUV] = Av_UV(8.0)
+  A = a + b/R
+  return A
+
+def Lanczos(x, y, xnew):
+  n = np.arange(len(x))
+  Ni = interp1d(x, n, kind='linear', fill_value='extrapolate')(xnew)
+  ynew = [np.sum(y*np.sinc(ni-n)) for ni in Ni]
+  return np.array(ynew)
