@@ -105,7 +105,7 @@ class Spectrum(object):
   @property
   def info(self):
     """
-    Returns non-array attributes (in same order as __init__). This can be passed
+    Returns non-array attributes (in same order as __init__). This can be
     used to create new spectra with the same information, e.g.
     >>> Spectrum(x, y, e, *S.info)
     """
@@ -360,6 +360,7 @@ class Spectrum(object):
       x2 = 1*X.x
     else:
       raise TypeError
+
     if kind == "Akima":
       y2 = Ak_i(self.x, self.y)(x2)
       e2 = Ak_i(self.x, self.e)(x2)
@@ -367,14 +368,18 @@ class Spectrum(object):
       y2[nan] = 0.
       e2[nan] = 0.
     elif kind == "sinc":
-      y2 = Lanczos(self.x, self.y, X)
-      e2 = Lanczos(self.x, self.e, X)
+      y2 = Lanczos(self.x, self.y, x2)
+      e2 = Lanczos(self.x, self.e, x2)
+      extrap = (x2<self.x.min()) | (x2>self.x.max())
+      y2[extrap] = 0.
+      e2[extrap] = np.inf
     else:
       extrap_y, extrap_e = (self.y[0],self.y[-1]), (self.e[0],self.e[-1])
       y2 = interp1d(self.x, self.y, kind=kind, \
         bounds_error=False, fill_value=0., **kwargs)(x2)
       e2 = interp1d(self.x, self.e, kind=kind, \
         bounds_error=False, fill_value=np.inf, **kwargs)(x2)
+
     return Spectrum(x2, y2, e2, *self.info)
 
   def copy(self):
@@ -634,23 +639,17 @@ def join_spectra(SS, sort=False, name=None):
     assert S.x_unit == S0.x_unit
     assert S.y_unit == S0.y_unit
 
-  kwargs = {
-    'name'   : S0.name,
-    'wave'   : S0.wave,
-    'x_unit' : S0.x_unit,
-    'y_unit' : S0.y_unit,
-  }
-
-
   x = np.hstack(S.x for S in SS)
   y = np.hstack(S.y for S in SS)
   e = np.hstack(S.e for S in SS)
-  S = Spectrum(x, y, e, **kwargs)
+  S = Spectrum(x, y, e, *S0.info)
+  
+  if name is not None:
+    S.name = name
   if sort:
-    idx = np.argsort(x)
-    return S[idx]
-  else:
-    return S
+    S = S[np.argsort(x)]
+
+  return S
 
 def spec_from_txt(fname, wave='air', x_unit='AA', y_unit='erg/(s cm2 AA)', **kwargs):
   """
@@ -750,21 +749,14 @@ def spectra_mean(SS):
 
   Xbar  = np.mean(X,axis=0)
   IVbar = np.sum(IV, axis=0)
-  Ybar  = np.sum(Y*IV, axis=0) * IVbar
+  Ybar  = np.sum(Y*IV, axis=0) / IVbar
   Ebar  = 1.0 / np.sqrt(IVbar)
 
-  kwargs = {
-    'name'   : S0.name,
-    'wave'   : S0.wave,
-    'x_unit' : S0.x_unit,
-    'y_unit' : S0.y_unit,
-  }
-
-  return Spectrum(Xbar, Ybar, Ebar, **kwargs)
+  return Spectrum(Xbar, Ybar, Ebar, *S0.info)
     
 ###############################################################################
 
-def voigt( x, x0, fwhm_g, fwhm_l ):
+def voigt(x, x0, fwhm_g, fwhm_l):
   sigma = voigt.Va*fwhm_g
   z = ((x-x0) + 0.5j*fwhm_l)/(sigma*voigt.Vb)
   return wofz(z).real/(sigma*voigt.Vc)
@@ -776,36 +768,30 @@ def load_transmission_curve(filt):
   """
   Loads the filter curves obtained from VOSA (SVO).
   """
-  long_path = "/home/astro/phujdu/Python/MH/mh/spectra/filt_profiles/"
-  if   filt in 'ugriz':
-    end_path = f"SLOAN_SDSS.{filt}.dat"
-  elif filt in 'UBVRI':
-    end_path = f"Generic_Johnson.{filt}.dat"
-  elif filt in ['Gaia'+b for b in 'G Bp Rp'.split()]:
-    fdict = {"Gaia"+k:v for k,v in zip(("G","Bp","Rp"), ("","bp","rp"))}
-    end_path = f"GAIA_GAIA2r.G{fdict[filt]}.dat"
-  elif filt in ['GalexFUV','GalexNUV']:
-    fdict = {"Galex"+k:k for k in ("NUV","FUV")}
-    end_path = f"GALEX_GALEX.{fdict[filt]}.dat"
-  elif filt == 'DenisI':
-    end_path = "DENIS_DENIS.I.dat"
-  elif filt in ['2m'+b for b in 'JHK']:
-    end_path = f"2MASS_2MASS.{filt[-1]}.dat"
-  elif filt in ['UK'+b for b in 'YJHK']:
-    end_path = f"UKIRT_UKIDSS.{filt[-1]}.dat"
-  elif filt in ['W'+b for b in '12']:
-    end_path = f"WISE_WISE.{filt}.dat"
-  elif filt in ['S'+b for b in '12']:
-    end_path = f"Spitzer_IRAC.I{filt[1]}.dat"
-  elif filt in ['sm'+b for b in 'uvgriz']:
-    end_path = f"SkyMapper_SkyMapper.{filt[2]}.dat"
-  elif filt in ['ps'+b for b in 'grizy']:
-    end_path = f"PAN-STARRS_PS1.{filt[2]}.dat"
-  elif filt in ['sw'+b for b in 'U UVW1 UVW2 UVM1'.split()]:
-    end_path = f"Swift_UVOT.{filt[2:]}.dat"
-  else:
-    raise ValueError('Invalid filter name: {}'.format(filt))
-  return model_from_txt(long_path+end_path, x_unit="AA", y_unit="")
+  filters_dir = "/home/astro/phujdu/Python/MH/mh/spectra/filt_profiles"
+
+  GaiaDict = {'G':'G', 'Bp':'Gbp', 'Rp':'Grp'}
+  filter_paths = {
+    **{f"2m{b}"   : f"2MASS_2MASS.{b}.dat" for b in "JHK"}, #2Mass
+    **{f"Denis{b}": f"DENIS_DENIS.{b}.dat" for b in "I"}, #DENIS
+    **{f"Gaia{b}" : f"GAIA_GAIA2r.{GaiaDict[b]}.dat" for b in ("G","Bp","Rp")}, #Gaia
+    **{f"Galex{b}": f"GALEX_GALEX.{b}.dat" for b in ("NUV", "FUV")}, #GALEX
+    **{b          : f"Generic_Johnson.{b}.dat" for b in "UBVRI"}, #Generic Johnson
+    **{f"ps{b}"   : f"PAN-STARRS_PS1.{b}.dat" for b in "grizy"}, #PanStarrs
+    **{b          : f"SLOAN_SDSS.{b}.dat" for b in "ugriz"}, #SDSS
+    **{f"sm{b}"   : f"SkyMapper_SkyMapper.{b}.dat" for b in "uvgriz"}, #SkyMapper
+    **{f"S{b}"    : f"Spitzer_IRAC.I{b}.dat" for b in "12"}, #Spitzer
+    **{f"sw{b}"   : f"Swift_UVOT.{b}.dat" for b in ("U","UVW1","UVW2","UVM2")}, #Swift
+    **{f"W{b}"    : f"WISE_WISE.W{b}.dat" for b in "12"}, #Wise
+  }
+
+  try:
+    full_path = "{}/{}".format(filters_dir, filter_paths[filt])
+  except KeyError:
+    print('Invalid filter name: {}'.format(filt))
+    exit()
+
+  return model_from_txt(full_path, x_unit="AA", y_unit="")
 #
 
 def mag_calc_AB(S, filt, NMONTE=1000, Ifun=Itrapz):
@@ -819,7 +805,7 @@ def mag_calc_AB(S, filt, NMONTE=1000, Ifun=Itrapz):
 
   Denis:     ['DenisI']
 
-  Gaia:      ['GaiaG', 'GaiaBp', GaiaRp']
+  Gaia:      ['Gaia(G,Bp,Rp)']
 
   Galex:     ['GalexFUV' 'GalexNUV']
 
@@ -829,9 +815,9 @@ def mag_calc_AB(S, filt, NMONTE=1000, Ifun=Itrapz):
 
   SDSS:      ['u','g','r','i','z']
 
-  Spitzer:   ['S1','S2']
-
   Skymapper: ['sm(uvgriz)']
+
+  Spitzer:   ['S1','S2']
 
   Swift:     ['sw(U,UVW1,UVW2,UVM1)']
 
@@ -877,7 +863,7 @@ def vac_to_air(Wvac):
   return Wvac/n
 #
 
-def air_to_vac( Wair ):
+def air_to_vac(Wair):
   """
   converts air wavelengths to vacuum wavelengths,
   as per VALD3 documentation (in Angstroms)
@@ -968,37 +954,24 @@ def Black_body(x, T, wave='air', x_unit="AA", y_unit="erg/(s cm2 AA)", norm=True
   return M
 #
 
-def sky_residual(params, x, y, e ):
-  """
-  Fitting function for sky_line_fwhm
-  """
-  A, x0, s, c = params
 
-  y_fit = A*np.exp( -0.5*((x-x0)/s)**2 ) + c
-
-  norm_residual = (y - y_fit)/e
-
-  if s < 0 or c < 0 or A < 0:
-    return norm_residual * 1000.
-  else:
-    return norm_residual
-#
-
-def sky_line_fwhm( w, sky, w0 ):
+def sky_line_fwhm(S, x0, dx=5.):
   """
   Given a sky spectrum, this fits a Gaussian to a
   sky line and returns the FWHM.
   """
-  guess = 1e-15, w0, 1., 0.
+  def sky_residual(params, S):
+    A, x0, fwhm, C = params
+    xw = fwhm /2.355
+    y_fit = A*np.exp(-0.5*((S.x-x0)/xw)**2) + C
+    return (S.y - y_fit)/S.e
 
-  clip = (w>w0-10.)&(w<w0+10.)
+  Sc = S.clip(x0-dx, x0+dx)
+  guess = Sc.y.max(), x0, 2*np.diff(Sc.x).mean(), Sc.y.min()
+  res = leastsq(sky_residual, guess, args=(Sc,), full_output=True)
+  vec, err = res[0], np.sqrt(np.diag(res[1]))
 
-  args= w[clip], sky[clip], np.sqrt(sky[clip])
-  result = leastsq(sky_residual, guess, args=args)
-
-  vec = result[0]
-
-  return vec[2] * 2.355
+  return vec[2], err[2]
 #
 
 def keep_points(x, fname):
