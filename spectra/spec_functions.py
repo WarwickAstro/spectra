@@ -7,42 +7,24 @@ from .spec_class import Spectrum
 from .misc import black_body
 
 __all__ = [
-  "ZeroSpectrum",
-  "UnitSpectrum",
   "Black_body",
   "join_spectra",
   "spectra_mean",
 ]
-
-def ZeroSpectrum(x, name="", wave='air', x_unit="AA", y_unit="erg/(s cm^2 AA)", head=None):
-  y = np.zeros_like(x)
-  e = np.zeros_like(x)
-  return Spectrum(x, y, e, name=name, wave=wave, x_unit=x_unit, y_unit=y_unit, head=head)
-
-def UnitSpectrum(x, name="", wave='air', x_unit="AA", head=None):
-  y = np.ones_like(x)
-  e = np.zeros_like(x)
-  return Spectrum(x, y, e, name=name, wave=wave, x_unit=x_unit, y_unit="", head=head)
 
 def Black_body(x, T, wave='air', x_unit="AA", y_unit="erg/(s cm2 AA)", norm=True):
   """
   Returns a Black body curve like black_body(), but the return value
   is a Spectrum class.
   """
-  zero_flux = np.zeros_like(x)
-  M = Spectrum(x, zero_flux, zero_flux, f'{T}K BlackBody', wave, x_unit, y_unit)
-  M.x_unit_to("AA")
-  M.y_unit_to("erg/(s cm2 AA)")
-  if wave=='air':
-    M.air_to_vac()
-  M.y = black_body(M.x, T, False)
-  if wave=='air':
-    M.vac_to_air()
-  M.x_unit_to(x_unit)
-  M.y_unit_to(y_unit)
+  BB = Spectrum(x, 0., 0., f'{T}K BlackBody', wave, x_unit, "erg/(s cm2 AA)")
+  BB.x_unit_to("AA")
+  BB += black_body(BB.x, T, False)
+  BB.x_unit_to(x_unit)
+  BB.y_unit_to(y_unit)
   if norm:
-    M /= M.y.max()
-  return M
+    BB /= BB.y.max()
+  return BB
 #
 
 #..............................................................................

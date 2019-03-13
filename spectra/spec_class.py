@@ -44,22 +44,38 @@ class Spectrum(object):
   def __init__(self, x, y, e, name="", wave='air', x_unit="AA", y_unit="erg/(s cm^2 AA)", head=None):
     """
     Initialise spectrum. Arbitrary header items can be added to self.head
+    x must be an ndarray. y and e can either by int/floats or ndarrays of
+    the same length.
     """
     assert isinstance(x, np.ndarray)
-    assert isinstance(y, np.ndarray)
-    assert isinstance(e, np.ndarray)
-    assert x.ndim == y.ndim == e.ndim == 1
-    assert len(x) == len(y) == len(e)
-    assert np.all(e >= 0.)
+    assert x.ndim == 1
+    self.x = x.astype(float)
+
+    if isinstance(y, (int, float, complex)):
+      self.y = y*np.ones_like(x)
+    elif isinstance(y, np.ndarray):
+      assert y.shape == x.shape
+      self.y = y
+    else:
+      raise TypeError
+
+    if isinstance(e, (int, float)):
+      assert e >= 0
+      self.e = e*np.ones_like(x) 
+    elif isinstance(e, np.ndarray):
+      assert e.shape == x.shape
+      assert np.all(e >= 0)
+      self.e = e
+    else:
+      raise TypeError
+
     assert isinstance(name, str)
     assert wave in ("air", "vac")
-    self.x = x
-    self.y = y
-    self.e = e
     self.name = name
     self.wave = wave
     self.x_unit = u.Unit(x_unit).to_string()
     self.y_unit = u.Unit(y_unit).to_string()
+
     if head is None:
       self.head = {}
     else:
@@ -568,6 +584,21 @@ class Spectrum(object):
     mag0 = self.mag_calc_AB(filt, NMONTE=0)
     return self * 10**(0.4*(mag0-mag))
     
+  def convolve_gaussian2(self, fwhm):
+    sigma = fwhm/2.355
+
+    #oversample spectrum by at least a factor 10 
+    dx = 0.1*np.diff(self.x).min()
+    xi = np.arange(self.x[0], self.x[-1], dx)
+    yi = interp1d(self.x, self.y)(xi)
+    Si = self.interp_wave(xi)
+
+    G = convolution.Gaussian1DKernel(sigma/dx)
+
+    Si.y = convolution.convolve_fft(Si.y, G)
+    return Si.interp_wave(self)
+  #
+
   def convolve_gaussian(self, fwhm):
     S = self.copy()
     S.y = convolve_gaussian(S.x, S.y, fwhm)

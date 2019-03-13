@@ -34,7 +34,7 @@ def model_from_txt(fname, wave='vac', x_unit='AA', y_unit='erg/(s cm2 AA)', **kw
   """
   x, y = np.loadtxt(fname, unpack=True, usecols=(0,1), **kwargs)
   name = os.path.splitext(os.path.basename(fname))[0]
-  return Spectrum(x, y, np.zeros_like(x), name, wave, x_unit, y_unit)
+  return Spectrum(x, y, 0, name, wave, x_unit, y_unit)
 
 def model_from_dk(fname, x_unit='AA', y_unit='erg/(s cm2 AA)', **kwargs):
   """
@@ -55,14 +55,14 @@ def model_from_dk(fname, x_unit='AA', y_unit='erg/(s cm2 AA)', **kwargs):
 
 def spec_from_npy(fname, wave='air', x_unit='AA', y_unit='erg/(s cm2 AA)'):
   """
-  Loads a text file with the first 3 columns as wavelengths, fluxes, errors.
+  Loads a npy file with 2 or 3 columns as wavelengths, fluxes(, errors).
   """
   data = np.load(fname)
   assert data.ndim == 2, "Data must be 2D"
 
   if data.shape[0] == 2:
     x, y = data
-    e = np.zeros_like(x)
+    e = 0
   elif data.shape[0] == 3:
     x, y, e = data
   else:
