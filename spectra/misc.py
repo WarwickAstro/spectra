@@ -12,6 +12,7 @@ __all__ = [
   "convolve_gaussian",
   "convolve_gaussian_R",
   "lanczos",
+  "logarange",
 ]
 
 jangstrom = \
@@ -125,3 +126,12 @@ def lanczos(x, y, xnew):
   Ni = interp1d(x, n, kind='linear', fill_value='extrapolate')(xnew)
   ynew = [np.sum(y*np.sinc(ni-n)) for ni in Ni]
   return np.array(ynew)
+
+def logarange(x0, x1, R):
+  """
+  Like np.arange but with log-spaced points. The spacing parameter, R,
+  is such that R = x/dx.
+  """
+  lx0, lx1= np.log(x0), np.log(x1)
+  logx = np.arange(lx0, lx1, 1/R)
+  return np.exp(logx)
