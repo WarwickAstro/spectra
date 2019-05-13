@@ -13,6 +13,7 @@ __all__ = [
   "convolve_gaussian_R",
   "lanczos",
   "logarange",
+  "keep_points",
 ]
 
 jangstrom = \
@@ -113,7 +114,7 @@ def keep_points(x, fname):
   creates a mask for a spectrum that regions between pairs from a file
   """
   try:
-    lines = open(fname,'r').readlines()
+    lines = open(fname,'r')
   except IOError:
     print("file %s does not exist" %fname)
     exit()

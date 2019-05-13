@@ -38,10 +38,11 @@ def join_spectra(SS, sort=False, name=None):
   S0 = SS[0]
   
   for S in SS:
-    assert isinstance(S, Spectrum), 'item is not Spectrum'
-    assert S.wave == S0.wave
-    assert S.x_unit == S0.x_unit
-    assert S.y_unit == S0.y_unit
+    if not isinstance(S, Spectrum):
+      raise TypeError('item is not Spectrum')
+    if S.wave != S0.wave:
+      raise ValueError("Spectra must have same wavelengths")
+    S._compare_units(S0, xy='xy')
 
   x = np.hstack(S.x for S in SS)
   y = np.hstack(S.y for S in SS)
@@ -62,12 +63,13 @@ def spectra_mean(SS):
   """
   S0 = SS[0]
   for S in SS:
-    assert isinstance(S, Spectrum)
-    assert len(S) == len(S0)
-    assert S.wave == S0.wave
-    assert np.isclose(S.x, S0.x).all()
-    assert S.x_unit == S0.x_unit
-    assert S.y_unit == S0.y_unit
+    if not isinstance(S, Spectrum):
+      raise TypeError('item is not Spectrum')
+    if S.wave != S0.wave:
+      raise ValueError("Spectra must have same wavelengths")
+    S._compare_units(S0, xy='xy')
+    if not np.allclose(S.x, S0.x):
+      raise ValueError("Spectra must have same x-axis")
 
   X, Y, IV = np.array([S.x    for S in SS]), \
              np.array([S.y    for S in SS]), \

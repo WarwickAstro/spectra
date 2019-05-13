@@ -4,7 +4,14 @@ __all__ = [
   "A_curve"
 ]
 
-def A_curve(x, R=3.1):
+def A_curve(x, R=3.1, use_model='CCM89'):
+  extinction_models = {
+    'CCM89' : A_CCM89,
+  }
+  model = extinction_models[use_model]
+  return model(x, R)
+
+def A_CCM89(x, R):
   """
   Calculate CCM 1989 extinction curve. x is in units of 1/um.
   """
@@ -62,4 +69,3 @@ def A_curve(x, R=3.1):
   a[FUV], b[FUV] = Av_UV(8.0)
   A = a + b/R
   return A
-
