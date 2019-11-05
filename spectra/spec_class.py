@@ -6,7 +6,9 @@ import matplotlib.pyplot as plt
 import math
 import astropy.units as u
 import astropy.constants as const
+from astropy.convolution import convolve
 from scipy.interpolate import interp1d, Akima1DInterpolator as Ak_i
+from scipy.optimize import minimize
 from .synphot import mag_calc_AB
 from .reddening import A_curve
 from .misc import *
@@ -203,7 +205,7 @@ class Spectrum(object):
     """
     Set errors for desired sn
     """
-    M.e = np.abs(M.y/value)
+    self.e = np.abs(self.y/value)
 
   @property
   def magAB(self):
@@ -213,6 +215,15 @@ class Spectrum(object):
     S = self.copy()
     S.y_unit_to("Jy")
     return -2.5*np.log10(S.y/3631)
+
+  @property
+  def magABe(self):
+    """
+    Returns fluxe errors in terms of AB magnitudes
+    """
+    S = self.copy()
+    S.y_unit_to("Jy")
+    return -2.5*np.log10(S.e/3631)
 
   @property
   def data(self):
@@ -225,11 +236,18 @@ class Spectrum(object):
   @property
   def info(self):
     """
-    Returns non-array attributes (in same order as __init__). This can be
+    Returns non-array attributes as a dictionary. This can be
     used to create new spectra with the same information, e.g.
-    >>> Spectrum(x, y, e, *S.info)
+    >>> Spectrum(x, y, e, **S.info)
     """
-    return self.name, self.wave, self.x_unit, self.y_unit, self.head
+    kwargs = {
+      'name'   : self.name,
+      'wave'   : self.wave,
+      'x_unit' : self.x_unit,
+      'y_unit' : self.y_unit,
+      'head'   : self.head,
+    }
+    return kwargs
 
   def __len__(self):
     """
@@ -242,11 +260,12 @@ class Spectrum(object):
     Return spectrum representation
     """
     ret = "\n".join([
-      "Spectrum class with {} pixels".format(len(self)),
-      "Name: {}".format(self.name),
-      "x-unit: {}".format(self.x_unit),
-      "y-unit: {}".format(self.y_unit),
-      "wavelengths: {}".format(self.wave),
+      f"Spectrum class with {len(self)} pixels",
+      f"name: {self.name}",
+      f"x-unit: {self.x_unit}",
+      f"y-unit: {self.y_unit}",
+      f"wavelengths: {self.wave}",
+      f"header: {self.head}",
     ])
 
     return ret
@@ -256,11 +275,8 @@ class Spectrum(object):
     Return self[key]
     """
     if isinstance(key, (int, slice, np.ndarray)):
-      indexed_data = self.x[key], self.y[key], self.e[key]
-      if isinstance(key, int):
-        return indexed_data
-      else:
-        return Spectrum(*indexed_data, *self.info)
+      data_key = self.x[key], self.y[key], self.e[key]
+      return data_key if isinstance(key, int) else Spectrum(*data_key, **self.info)
     else:
       raise TypeError("spectra must be indexed with int/slice/ndarray types")
 
@@ -270,6 +286,12 @@ class Spectrum(object):
     """
     return zip(*self.data)
 
+  def __contains__(self, value):
+    """
+    Return whether value is in the x-range of self
+    """
+    return self.x.min() < value < self.x.max()
+
   def promote_to_spectrum(self, other, dimensionless_y=False):
     """
     Promote non-Spectrum objects (int/float/ndarray/quantity) to a Spectrum
@@ -277,16 +299,17 @@ class Spectrum(object):
     arithmetic implementation, but also necessary for reverse arithmetic
     operations using ndarrays and quantities, e.g. 1 / Spectrum.
     """
+    info = self.info
     if isinstance(other, u.Quantity):
-      Sother = Spectrum(self.x, other.value, 0, *self.info)
-      Sother.y_unit = other.unit
+      ynew = other.value
+      info['y_unit'] = other.unit
     elif isinstance(other, (int, float, np.ndarray)):
-      Sother = Spectrum(self.x, other, 0, *self.info)
+      ynew = other
       if dimensionless_y:
-        Sother.y_unit = u.dimensionless_unscaled
+        info['y_unit'] = u.dimensionless_unscaled
     else:
       raise NotImplementedError("Cannot cast object to Spectrum")
-    return Sother
+    return Spectrum(self.x, ynew, 0, **info)
 
   def __add__(self, other):
     """
@@ -297,7 +320,7 @@ class Spectrum(object):
       self._compare_x(other)
       ynew = self.y + other.y
       enew = np.hypot(self.e, other.e)
-      return Spectrum(self.x, ynew, enew, *self.info)
+      return Spectrum(self.x, ynew, enew, **self.info)
     else:
       Sother = self.promote_to_spectrum(other)
       return self + Sother
@@ -311,7 +334,7 @@ class Spectrum(object):
       self._compare_x(other)
       ynew = self.y - other.y
       enew = np.hypot(self.e, other.e)
-      return Spectrum(self.x, ynew, enew, *self.info)
+      return Spectrum(self.x, ynew, enew, **self.info)
     else:
       Sother = self.promote_to_spectrum(other)
       return self - Sother
@@ -323,11 +346,11 @@ class Spectrum(object):
     if isinstance(other, Spectrum):
       self._compare_units(other, 'x')
       self._compare_x(other)
+      infonew = self.info
+      infonew['y_unit'] = self._yu * other._yu
       ynew = self.y * other.y
       enew = np.abs(ynew)*np.hypot(self.e/self.y, other.e/other.y)
-      Snew = Spectrum(self.x, ynew, enew, *self.info)
-      Snew.y_unit = self._yu * other._yu
-      return Snew
+      return Spectrum(self.x, ynew, enew, **infonew)
     else:
       Sother = self.promote_to_spectrum(other, True)
       return self * Sother
@@ -339,11 +362,11 @@ class Spectrum(object):
     if isinstance(other, Spectrum):
       self._compare_units(other, 'x')
       self._compare_x(other)
+      infonew = self.info
+      infonew['y_unit'] = self._yu / other._yu
       ynew = self.y / other.y
       enew = np.abs(ynew)*np.hypot(self.e/self.y, other.e/other.y)
-      Snew = Spectrum(self.x, ynew, enew, *self.info)
-      Snew.y_unit = self._yu / other._yu
-      return Snew
+      return Spectrum(self.x, ynew, enew, **infonew)
     else:
       Sother = self.promote_to_spectrum(other, True)
       return self / Sother
@@ -378,11 +401,11 @@ class Spectrum(object):
     Return S**other (with standard error propagation)
     """
     if isinstance(other, (int, float)):
+      infonew = self.info
+      infonew['y_unit'] = self._yu**other
       ynew = self.y**other
       enew = np.abs(other * ynew * self.e/self.y)
-      S = Spectrum(self.x, ynew, enew, *self.info)
-      S.y_unit = self._yu**other
-      return S
+      return Spectrum(self.x, ynew, enew, **infonew)
     else:
       raise TypeError("other must be int/float")
 
@@ -443,7 +466,7 @@ class Spectrum(object):
   def _compare_x(self, other):
     if self.wave != other.wave:
       raise ValueError("Spectra must have same wavelengths (air/vac)")
-    if not np.array_equal(self.x, other.x):
+    if not np.allclose(self.x, other.x):
       raise ValueError("Spectra must have same x values")
 
   def apply_mask(self, mask):
@@ -477,7 +500,7 @@ class Spectrum(object):
       NMONTE = 0 
     return mag_calc_AB(S, filt, NMONTE)
 
-  def interp(self, X, kind='linear', **kwargs):
+  def interp(self, X, kind='cubic', **kwargs):
     """
     Interpolates a spectrum onto the wavlength axis X, if X is a numpy array,
     or X.x if X is Spectrum type. This returns a new spectrum rather than
@@ -518,13 +541,13 @@ class Spectrum(object):
         bounds_error=False, fill_value=np.inf, **kwargs)(x2)
 
     e2[e2 < 0] = 0.
-    return Spectrum(x2, y2, e2, *self.info)
+    return Spectrum(x2, y2, e2, **self.info)
 
   def copy(self):
     """
     Returns a copy of self
     """
-    return Spectrum(*self.data, *self.info)
+    return Spectrum(*self.data, **self.info)
 
   def sect(self, x0, x1):
     """
@@ -675,7 +698,30 @@ class Spectrum(object):
     S = other
     M = self.interp(S)
 
-    A = np.sum(S.y*M.y)/np.sum(M.y)
+    A = np.sum(S.y*M.y)/np.sum(M.y**2)
+
+    return (self*A, A) if return_scaling_factor else self*A
+
+  def scale_spectrum_to_spectrum(self, other, return_scaling_factor=False):
+    """
+    Scales self to best fit other in their mutually overlapping region.
+    """
+    if not isinstance(other, Spectrum):
+      raise TypeError
+    self._compare_units(other, 'xy')
+
+    x0 = max(S.x.min() for S in (self, other))
+    x1 = min(S.x.max() for S in (self, other))
+    Soc = other.clip(x0, x1)
+    Ssi = self.interp(Soc, kind='cubic')
+
+    def chi2(A, S1, S2):
+      top = (S1.y - A*S2.y)**2
+      bot = (S1.e**2 + (A*S2.e)**2)
+      return np.sum(top / bot)
+
+    res = minimize(chi2, (1.0), args=(Soc, Ssi))  
+    A = float(res['x'][0])
 
     return (self*A, A) if return_scaling_factor else self*A
 
@@ -693,6 +739,29 @@ class Spectrum(object):
     S.y = convolve_gaussian_R(S.x, S.y, res)
     return S
 
+  def rot_broaden(self, vsini, dv=1.0):
+    """
+    Apply rotational broadening in km/s. The dv parameter sets the resolution
+    that convolution is performed at.
+    """
+    xu, yu = self.x_unit, self.y_unit
+    S = self.copy()
+    S.x_unit_to(u.AA)
+    S.y_unit_to("erg/(s cm2)")
+    logx = np.log(S.x)
+    logx = np.arange(logx[0], logx[-1], dv/3e5)
+    xnew = np.exp(logx) #0.1km/s resolution
+    S = S.interp(xnew, kind='cubic')
+    kxR = np.arange(0, vsini, dv)
+    kxL = -kxR[:0:-1]
+    kx = np.hstack([kxL,kxR])
+    ky = np.sqrt(1-(kx/vsini)**2)
+    S.y = convolve(S.y, ky)
+    S = S.interp(self, kind='cubic')
+    S.x_unit_to(xu)
+    S.y_unit_to(yu)
+    return S
+
   def polyfit(self, deg, weighted=True, logx=False, logy=False):
     """
     Fits a polynomial to a spectrum object.
@@ -700,16 +769,21 @@ class Spectrum(object):
     x = np.log(self.x) if logx else self.x
     y = np.log(np.abs(self.y)) if logy else self.y
     e = np.abs(self.e/self.y) if logy else self.e
-    return np.polyfit(x, y, deg, w=1/e) if weighted else np.polyfit(x, y, deg)
+    poly = np.polyfit(x, y, deg, w=1/e) if weighted else np.polyfit(x, y, deg)
+    return poly, logx, logy, self.y_unit
 
-  def polyval(self, poly, logx=False, logy=False):
+  def polyval(self, polyres):
     """
     Generates a spectrum from polynomial coefficients with the same shape/units as self.
+    polyres should be: poly, logx, logy, y_unit
     """
+    poly, logx, logy, y_unit = polyres
     x = np.log(self.x) if logx else self.x
     y = np.polyval(poly, x)
     y = np.exp(y) if logy else y
-    return Spectrum(x, y, 0, *self.info)
+    infonew = self.info
+    infonew['y_unit'] = y_unit
+    return Spectrum(self.x, y, 0, **infonew)
 
   def split(self, W):
     """
@@ -745,10 +819,38 @@ class Spectrum(object):
     """
     return np.argmin(np.abs(self.x-x0))
 
-  def plot(self, *args, errors=False, **kwargs):
+  def isnan(self):
+    """
+    Returns truth-array showing pixels with nans (either x, y, or e)
+    """
+    return np.isnan(self.x) | np.isnan(self.y) | np.isnan(self.e)
+
+  def isinf(self):
+    """
+    Returns truth-array showing pixels with infs (either x, y, or e)
+    """
+    return np.isinf(self.x) | np.isinf(self.y) | np.isinf(self.e)
+
+  def plot(self, *args, kind='y', **kwargs):
     """
     Plots the spectrum with matplotlib and passes *args/**kwargs.
+    'kind' should be one of 'y', 'e', 'var', 'ivar', 'SN', 'magAB', 'magABe'.
     plt.show() and other mpl functions still need to be used separately.
     """
-    y_plot = self.e if errors else self.y
+    allowed = "y e var ivar SN magAB magABe"
+    if kind not in allowed.split(): 
+      raise ValueError(f"kind must be one of: {allowed}")
+
+    y_plot = getattr(self, kind)
     plt.plot(self.x, y_plot, *args, **kwargs)
+
+    #default y limits (if not already set)
+    ax = plt.gca()
+    if ax.get_autoscaley_on():
+      ylo, yhi = ax.get_ylim()
+      if kind.startswith('magAB'):
+        if ylo < yhi:
+          plt.ylim(yhi, ylo)
+      else:
+        plt.ylim(0, yhi)
+      ax.set_autoscaley_on(True)

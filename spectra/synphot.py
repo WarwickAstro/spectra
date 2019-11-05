@@ -21,6 +21,7 @@ filter_paths = {
   **{f"sm{b}"   : f"SkyMapper_SkyMapper.{b}.dat" for b in "uvgriz"}, #SkyMapper
   **{f"S{b}"    : f"Spitzer_IRAC.I{b}.dat" for b in "12"}, #Spitzer
   **{f"sw{b}"   : f"Swift_UVOT.{b}.dat" for b in ("U","UVW1","UVW2","UVM2")}, #Swift
+  **{f"UK{b}"   : f"UKIRT_UKIDSS.{b}.dat" for b in "ZYJHK"}, #UKIRT
   **{f"W{b}"    : f"WISE_WISE.W{b}.dat" for b in "12"}, #Wise
 }
 

@@ -44,10 +44,10 @@ def join_spectra(SS, sort=False, name=None):
       raise ValueError("Spectra must have same wavelengths")
     S._compare_units(S0, xy='xy')
 
-  x = np.hstack(S.x for S in SS)
-  y = np.hstack(S.y for S in SS)
-  e = np.hstack(S.e for S in SS)
-  S = Spectrum(x, y, e, *S0.info)
+  x = np.hstack([S.x for S in SS])
+  y = np.hstack([S.y for S in SS])
+  e = np.hstack([S.e for S in SS])
+  S = Spectrum(x, y, e, **S0.info)
   
   if name is not None:
     S.name = name
@@ -65,22 +65,17 @@ def spectra_mean(SS):
   for S in SS:
     if not isinstance(S, Spectrum):
       raise TypeError('item is not Spectrum')
-    if S.wave != S0.wave:
-      raise ValueError("Spectra must have same wavelengths")
     S._compare_units(S0, xy='xy')
-    if not np.allclose(S.x, S0.x):
-      raise ValueError("Spectra must have same x-axis")
+    S._compare_x(S0)
 
-  X, Y, IV = np.array([S.x    for S in SS]), \
-             np.array([S.y    for S in SS]), \
-             np.array([S.ivar for S in SS])
+  Y  = np.array([S.y    for S in SS])
+  IV = np.array([S.ivar for S in SS])
 
-  Xbar  = np.mean(X,axis=0)
   IVbar = np.sum(IV, axis=0)
   Ybar  = np.sum(Y*IV, axis=0) / IVbar
   Ebar  = 1.0 / np.sqrt(IVbar)
 
-  return Spectrum(Xbar, Ybar, Ebar, *S0.info)
+  return Spectrum(S0.x, Ybar, Ebar, **S0.info)
 
 def sky_line_fwhm(S, x0, dx=5.):
   """
@@ -88,16 +83,16 @@ def sky_line_fwhm(S, x0, dx=5.):
   sky line and returns the FWHM.
   """
   def sky_residual(params, S):
-    A, x0, fwhm, C = params
+    x0, fwhm, A, C = params
     xw = fwhm /2.355
     y_fit = A*np.exp(-0.5*((S.x-x0)/xw)**2) + C
     return (S.y - y_fit)/S.e
 
   Sc = S.clip(x0-dx, x0+dx)
-  guess = Sc.y.max(), x0, 2*np.diff(Sc.x).mean(), Sc.y.min()
+  guess = x0, 2*np.diff(Sc.x).mean(), Sc.y.max(), Sc.y.min()
   res = leastsq(sky_residual, guess, args=(Sc,), full_output=True)
   vec, err = res[0], np.sqrt(np.diag(res[1]))
 
-  return vec[2], err[2]
+  return vec[0], vec[2]+vec[3], (vec[1], err[1])
 #
 

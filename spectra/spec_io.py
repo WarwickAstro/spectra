@@ -30,6 +30,7 @@ el_dict = {
 def spec_from_txt(fname, wave='air', x_unit='AA', y_unit='erg/(s cm2 AA)', **kwargs):
   """
   Loads a text file with the first 3 columns as wavelengths, fluxes, errors.
+  kwargs are passed to np.loadtxt.
   """
   x, y, e = np.loadtxt(fname, unpack=True, usecols=(0,1,2), **kwargs)
   name = os.path.splitext(os.path.basename(fname))[0]
@@ -39,26 +40,25 @@ def model_from_txt(fname, wave='vac', x_unit='AA', y_unit='erg/(s cm2 AA)', **kw
   """
   Loads a text file with the first 2 columns as wavelengths and fluxes.
   This produces a spectrum object where the errors are just set to zero.
-  This is therefore good to use for models.
+  This is therefore good to use for models. kwargs are passed to np.loadtxt.
   """
   x, y = np.loadtxt(fname, unpack=True, usecols=(0,1), **kwargs)
   name = os.path.splitext(os.path.basename(fname))[0]
   return Spectrum(x, y, 0, name, wave, x_unit, y_unit)
 
-def model_from_dk(fname, x_unit='AA', y_unit='erg/(s cm2 AA)', **kwargs):
+def model_from_dk(fname, x_unit='AA', y_unit='erg/(s cm2 AA)'):
   """
-  Similar to model_from_txt, but will autoskip past the DK header. Units are converted 
+  Similar to model_from_txt, but will autoskip past the DK header.
+  Units are converted to those specified.
   """
   #extract header first
   hdr = {'el':{}}
   with open(fname, 'r') as Fdk:
     for skip, line in enumerate(Fdk, 1):
       if line.startswith("TEFF"):
-        Teff = float(line.split()[2])
-        hdr['Teff'] = Teff
+        hdr['Teff'] = float(line.split()[2])
       elif line.startswith("LOG_G"):
-        logg = float(line.split()[2])
-        hdr['logg'] = logg
+        hdr['logg'] = float(line.split()[2])
       elif line.startswith("COMMENT   el"):
         *_, Z, logZ = line.split() 
         Z = int(Z)
@@ -85,8 +85,7 @@ def spec_from_npy(fname, wave='air', x_unit='AA', y_unit='erg/(s cm2 AA)'):
     raise ValueError("Data must be 2D")
 
   if data.shape[0] == 2:
-    x, y = data
-    e = 0
+    x, y, e = *data, 0
   elif data.shape[0] == 3:
     x, y, e = data
   else:
@@ -114,7 +113,7 @@ def spec_list_from_molly(fname):
   def convert_mol(molsp):
     x, y, e = molsp.wave, molsp.f, molsp.fe
     name = molsp.head['Object']
-    S = Spectrum(x, y, e, name, y_unit="mJy")
+    S = Spectrum(x, y, np.abs(e), name, y_unit="mJy")
     S.head = molsp.head
     return S
   
